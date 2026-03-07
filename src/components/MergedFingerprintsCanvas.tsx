@@ -1,0 +1,395 @@
+import React, { useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
+import { FingerprintParams } from '../presets';
+import { generateStreamlines, Point } from './FingerprintGenerator';
+
+export type CanvasItem = {
+    id: string;
+    x: number;
+    y: number;
+    rotation: number;
+    scale: number;
+    params: FingerprintParams;
+};
+
+interface MergedFingerprintsCanvasProps {
+    items: CanvasItem[];
+    view: { x: number; y: number; zoom: number };
+    width: number;
+    height: number;
+}
+
+// Check if a point (x, y) in canvas coordinates falls inside the bounding ellipse of a fingerprint item
+function isInsideFingerprint(px: number, py: number, item: CanvasItem, cullingOffset: number = 0) {
+    // 1. Un-translate
+    let dx = px - item.x;
+    let dy = py - item.y;
+
+    // 2. Un-scale
+    dx /= item.scale;
+    dy /= item.scale;
+
+    // 3. Un-rotate
+    const cos = Math.cos(-item.rotation * Math.PI / 180);
+    const sin = Math.sin(-item.rotation * Math.PI / 180);
+    const nx = dx * cos - dy * sin;
+    const ny = dx * sin + dy * cos;
+
+    // 4. Bounding ellipse/squircle check
+    const boundsX = item.params.boundsX ?? 0.7;
+    const boundsY = item.params.boundsY ?? 0.875;
+    const shapePower = item.params.shapePower ?? 2.0;
+
+    const rx = 256 * boundsX;
+    const ry = 256 * boundsY;
+    const cy = 64;
+
+    const normX = nx / rx;
+    const normY = (ny - cy) / ry;
+
+    const threshold = Math.pow(1.0 + cullingOffset, shapePower);
+    return (Math.pow(Math.abs(normX), shapePower) + Math.pow(Math.abs(normY), shapePower)) <= threshold;
+}
+
+export type DotCircle = { x: number; y: number; r: number };
+
+function collectDotCircles(
+    items: CanvasItem[],
+    view: { x: number; y: number; zoom: number },
+    cullingOffset: number,
+): DotCircle[] {
+    const circles: DotCircle[] = [];
+
+    for (let layerIndex = 0; layerIndex < items.length; layerIndex++) {
+        const item = items[layerIndex];
+        const lines = generateStreamlines(item.params, 512, 512, item.scale);
+        const noiseScale = item.params.noiseScale ?? 10;
+
+        const transformPoint = (lx: number, ly: number) => {
+            let cx = lx - 256;
+            let cy = ly - 256;
+            const cos = Math.cos(item.rotation * Math.PI / 180);
+            const sin = Math.sin(item.rotation * Math.PI / 180);
+            let nx = cx * cos - cy * sin;
+            let ny = cx * sin + cy * cos;
+            nx = nx * item.scale + item.x;
+            ny = ny * item.scale + item.y;
+            return { x: nx, y: ny };
+        };
+
+        const isCulled = (gx: number, gy: number) => {
+            for (let aboveIndex = layerIndex + 1; aboveIndex < items.length; aboveIndex++) {
+                if (isInsideFingerprint(gx, gy, items[aboveIndex], cullingOffset)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const dotSpacing = item.params.dotSpacing ?? 18;
+        const dotSizeMin = item.params.dotSizeMin ?? 1.5;
+        const dotSizeMax = item.params.dotSizeMax ?? 6.0;
+
+        function getSize(lx: number, ly: number) {
+            const scaledMin = dotSizeMin / item.scale;
+            const scaledMax = dotSizeMax / item.scale;
+            const nxl = (lx / 512) * 2 - 1;
+            const nyl = -((ly / 512) * 2 - 1);
+            let v = 0;
+            v += Math.sin(nxl * noiseScale + item.params.seed) * Math.cos(nyl * noiseScale + item.params.seed);
+            v += 0.5 * Math.sin(nxl * (noiseScale * 2) - item.params.seed) * Math.cos(nyl * (noiseScale * 2) + item.params.seed);
+            v = (v + 1.5) / 3;
+            return scaledMin + v * (scaledMax - scaledMin);
+        }
+
+        const scaledDotSpacing = dotSpacing / item.scale;
+
+        for (const line of lines) {
+            let distSinceLastDot = scaledDotSpacing / 2;
+            for (let i = 1; i < line.length; i++) {
+                const p1 = line[i - 1];
+                const p2 = line[i];
+                const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                distSinceLastDot += d;
+                if (distSinceLastDot >= scaledDotSpacing) {
+                    distSinceLastDot -= scaledDotSpacing;
+                    const globalP2 = transformPoint(p2.x, p2.y);
+                    if (!isCulled(globalP2.x, globalP2.y)) {
+                        const baseRadius = getSize(p2.x, p2.y) * item.scale;
+                        circles.push({
+                            x: globalP2.x * view.zoom + view.x,
+                            y: globalP2.y * view.zoom + view.y,
+                            r: baseRadius * view.zoom,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    return circles;
+}
+
+export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFingerprintsCanvasProps & { cullingOffset?: number }>(
+    function MergedFingerprintsCanvas({ items, view, width, height, cullingOffset = 0.05 }, ref) {
+
+        const localRef = useRef<HTMLCanvasElement>(null);
+        useImperativeHandle(ref, () => ({
+            get canvas() { return localRef.current; },
+            getDotCircles: () => collectDotCircles(items, view, cullingOffset),
+            downloadSVG: () => {
+                let svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">\n`;
+                svgContent += `  <rect width="100%" height="100%" fill="#f5f5f5" />\n`;
+
+                for (let layerIndex = 0; layerIndex < items.length; layerIndex++) {
+                    const item = items[layerIndex];
+                    const lines = generateStreamlines(item.params, 512, 512, item.scale);
+                    const lineThicknessMin = item.params.lineThicknessMin ?? 3;
+                    const lineThicknessMax = item.params.lineThicknessMax ?? 3;
+                    const noiseScale = item.params.noiseScale ?? 10;
+
+                    function getLineThickness(lx: number, ly: number) {
+                        const scaledMin = lineThicknessMin / item.scale;
+                        const scaledMax = lineThicknessMax / item.scale;
+                        if (scaledMin === scaledMax) return scaledMin;
+                        const nx = (lx / 512) * 2 - 1;
+                        const ny = -((ly / 512) * 2 - 1);
+                        let v = 0;
+                        v += Math.sin(nx * noiseScale + item.params.seed + 10) * Math.cos(ny * noiseScale + item.params.seed + 10);
+                        v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed + 10) * Math.cos(ny * (noiseScale * 2) + item.params.seed + 10);
+                        v = (v + 1.5) / 3;
+                        return scaledMin + v * (scaledMax - scaledMin);
+                    }
+
+                    const transformPoint = (lx: number, ly: number) => {
+                        let cx = lx - 256;
+                        let cy = ly - 256;
+                        const cos = Math.cos(item.rotation * Math.PI / 180);
+                        const sin = Math.sin(item.rotation * Math.PI / 180);
+                        let nx = cx * cos - cy * sin;
+                        let ny = cx * sin + cy * cos;
+                        nx = nx * item.scale + item.x;
+                        ny = ny * item.scale + item.y;
+                        return { x: nx, y: ny };
+                    };
+
+                    const isCulled = (gx: number, gy: number) => {
+                        for (let aboveIndex = layerIndex + 1; aboveIndex < items.length; aboveIndex++) {
+                            if (isInsideFingerprint((gx - view.x) / view.zoom, (gy - view.y) / view.zoom, items[aboveIndex], cullingOffset)) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+
+                    const dotSpacing = item.params.dotSpacing ?? 18;
+                    const dotSizeMin = item.params.dotSizeMin ?? 1.5;
+                    const dotSizeMax = item.params.dotSizeMax ?? 6.0;
+
+                    function getSize(lx: number, ly: number) {
+                        const scaledMin = dotSizeMin / item.scale;
+                        const scaledMax = dotSizeMax / item.scale;
+                        const nx = (lx / 512) * 2 - 1;
+                        const ny = -((ly / 512) * 2 - 1);
+                        let v = 0;
+                        v += Math.sin(nx * noiseScale + item.params.seed) * Math.cos(ny * noiseScale + item.params.seed);
+                        v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed) * Math.cos(ny * (noiseScale * 2) + item.params.seed);
+                        v = (v + 1.5) / 3;
+                        return scaledMin + v * (scaledMax - scaledMin);
+                    }
+
+                    // 1. Draw Lines
+                    for (const line of lines) {
+                        for (let i = 1; i < line.length; i++) {
+                            const p1 = transformPoint(line[i - 1].x, line[i - 1].y);
+                            const p2 = transformPoint(line[i].x, line[i].y);
+
+                            // Adjust for view
+                            const v1x = p1.x * view.zoom + view.x;
+                            const v1y = p1.y * view.zoom + view.y;
+                            const v2x = p2.x * view.zoom + view.x;
+                            const v2y = p2.y * view.zoom + view.y;
+
+                            if (!isCulled(v1x, v1y) && !isCulled(v2x, v2y)) {
+                                const baseThickness = getLineThickness(line[i].x, line[i].y) * item.scale;
+                                const thickness = baseThickness * view.zoom;
+                                svgContent += `  <line x1="${v1x.toFixed(2)}" y1="${v1y.toFixed(2)}" x2="${v2x.toFixed(2)}" y2="${v2y.toFixed(2)}" stroke="#b0b0b0" stroke-width="${thickness.toFixed(2)}" stroke-linecap="round" />\n`;
+                            }
+                        }
+                    }
+
+                    // 2. Draw Dots
+                    for (const line of lines) {
+                        const scaledDotSpacing = dotSpacing / item.scale;
+                        let distSinceLastDot = scaledDotSpacing / 2;
+                        for (let i = 1; i < line.length; i++) {
+                            const p1 = line[i - 1];
+                            const p2 = line[i];
+                            const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                            distSinceLastDot += d;
+                            if (distSinceLastDot >= scaledDotSpacing) {
+                                distSinceLastDot -= scaledDotSpacing;
+
+                                const globalP2 = transformPoint(p2.x, p2.y);
+                                const v2x = globalP2.x * view.zoom + view.x;
+                                const v2y = globalP2.y * view.zoom + view.y;
+
+                                if (!isCulled(v2x, v2y)) {
+                                    const baseRadius = getSize(p2.x, p2.y) * item.scale;
+                                    const radius = baseRadius * view.zoom;
+                                    svgContent += `  <circle cx="${v2x.toFixed(2)}" cy="${v2y.toFixed(2)}" r="${radius.toFixed(2)}" fill="#111111" />\n`;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                svgContent += `</svg>`;
+                const blob = new Blob([svgContent], { type: 'image/svg+xml' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.download = 'composite-whorls.svg';
+                link.href = url;
+                link.click();
+                URL.revokeObjectURL(url);
+            }
+        }));
+
+        useEffect(() => {
+            const canvas = localRef.current;
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+
+            // Clear screen and fill with solid white so ThreeJS alphaMap treats the background as solid (1.0)
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            // To apply the pan and zoom
+            ctx.save();
+            ctx.translate(view.x, view.y);
+            ctx.scale(view.zoom, view.zoom);
+
+            // We iterate from bottom (index 0) to top (index length-1).
+            for (let layerIndex = 0; layerIndex < items.length; layerIndex++) {
+                const item = items[layerIndex];
+
+                // We pre-generate the streamlines for this item matching its 512x512 generator space
+                const lines = generateStreamlines(item.params, 512, 512, item.scale);
+
+                const lineThicknessMin = item.params.lineThicknessMin ?? 3;
+                const lineThicknessMax = item.params.lineThicknessMax ?? 3;
+                const noiseScale = item.params.noiseScale ?? 10;
+
+                function getLineThickness(lx: number, ly: number) {
+                    const scaledMin = lineThicknessMin / item.scale;
+                    const scaledMax = lineThicknessMax / item.scale;
+                    if (scaledMin === scaledMax) return scaledMin;
+                    const nx = (lx / 512) * 2 - 1;
+                    const ny = -((ly / 512) * 2 - 1);
+                    let v = 0;
+                    v += Math.sin(nx * noiseScale + item.params.seed + 10) * Math.cos(ny * noiseScale + item.params.seed + 10);
+                    v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed + 10) * Math.cos(ny * (noiseScale * 2) + item.params.seed + 10);
+                    v = (v + 1.5) / 3;
+                    return scaledMin + v * (scaledMax - scaledMin);
+                }
+
+                // Function to transform 512x512 coordinates to global canvas space for this item
+                const transformPoint = (lx: number, ly: number) => {
+                    // Coordinates relative to center of the 512x512 generator
+                    let cx = lx - 256;
+                    let cy = ly - 256;
+
+                    // Rotate
+                    const cos = Math.cos(item.rotation * Math.PI / 180);
+                    const sin = Math.sin(item.rotation * Math.PI / 180);
+                    let nx = cx * cos - cy * sin;
+                    let ny = cx * sin + cy * cos;
+
+                    // Scale and translate
+                    nx = nx * item.scale + item.x;
+                    ny = ny * item.scale + item.y;
+                    return { x: nx, y: ny };
+                };
+
+                const isCulled = (gx: number, gy: number) => {
+                    // If this point is inside the bounding ellipse of ANY item ABOVE this layer, it is culled.
+                    for (let aboveIndex = layerIndex + 1; aboveIndex < items.length; aboveIndex++) {
+                        if (isInsideFingerprint(gx, gy, items[aboveIndex], cullingOffset)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                // 1. Draw Lines
+                ctx.strokeStyle = '#b0b0b0';
+                for (const line of lines) {
+                    for (let i = 1; i < line.length; i++) {
+                        const p1 = transformPoint(line[i - 1].x, line[i - 1].y);
+                        const p2 = transformPoint(line[i].x, line[i].y);
+
+                        if (!isCulled(p1.x, p1.y) && !isCulled(p2.x, p2.y)) {
+                            ctx.beginPath();
+                            ctx.moveTo(p1.x, p1.y);
+                            ctx.lineTo(p2.x, p2.y);
+                            ctx.lineWidth = getLineThickness(line[i].x, line[i].y) * item.scale;
+                            ctx.stroke();
+                        }
+                    }
+                }
+
+                // 2. Draw Dots
+                ctx.fillStyle = '#111111';
+
+                const dotSpacing = item.params.dotSpacing ?? 18;
+                const dotSizeMin = item.params.dotSizeMin ?? 1.5;
+                const dotSizeMax = item.params.dotSizeMax ?? 6.0;
+
+                function getSize(lx: number, ly: number) {
+                    const scaledMin = dotSizeMin / item.scale;
+                    const scaledMax = dotSizeMax / item.scale;
+                    const nx = (lx / 512) * 2 - 1;
+                    const ny = -((ly / 512) * 2 - 1);
+                    let v = 0;
+                    v += Math.sin(nx * noiseScale + item.params.seed) * Math.cos(ny * noiseScale + item.params.seed);
+                    v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed) * Math.cos(ny * (noiseScale * 2) + item.params.seed);
+                    v = (v + 1.5) / 3;
+                    return scaledMin + v * (scaledMax - scaledMin);
+                }
+
+                const scaledDotSpacing = dotSpacing / item.scale;
+
+                for (const line of lines) {
+                    let distSinceLastDot = scaledDotSpacing / 2;
+                    for (let i = 1; i < line.length; i++) {
+                        const p1 = line[i - 1];
+                        const p2 = line[i];
+                        const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                        distSinceLastDot += d;
+                        if (distSinceLastDot >= scaledDotSpacing) {
+                            distSinceLastDot -= scaledDotSpacing;
+
+                            const globalP2 = transformPoint(p2.x, p2.y);
+                            if (!isCulled(globalP2.x, globalP2.y)) {
+                                const radius = getSize(p2.x, p2.y) * item.scale;
+                                ctx.beginPath();
+                                ctx.arc(globalP2.x, globalP2.y, radius, 0, Math.PI * 2);
+                                ctx.fill();
+                            }
+                        }
+                    }
+                }
+
+                // Reset composite operation for the next layer
+                ctx.globalCompositeOperation = 'source-over';
+            }
+
+            ctx.restore();
+        }, [items, view, width, height]);
+
+        return <canvas ref={localRef} width={width} height={height} className="absolute inset-0 pointer-events-none" />;
+    }
+);

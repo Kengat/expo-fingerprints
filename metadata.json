@@ -1,0 +1,5 @@
+{
+  "name": "Whorl Fingerprint Generator",
+  "description": "A highly realistic, procedural whorl fingerprint generator using WebGL and Gabor filters.",
+  "requestFramePermissions": []
+}
