@@ -313,11 +313,11 @@ const fragmentShaderVector = `
   }
 `;
 
-export function generateStreamlines(params: FingerprintParams, width: number, height: number, scale: number = 1) {
-  const lineDensity = Math.max(4, (params.lineDensity ?? 16) / scale);
+export function generateStreamlines(params: FingerprintParams, width: number, height: number) {
+  const lineDensity = Math.max(4, params.lineDensity ?? 16);
   const dsep = lineDensity;
   const dtest = dsep * 0.75;
-  const step = Math.max(0.5, 2 / scale);
+  const step = 2;
 
   const cellSize = dsep;
   const cols = Math.ceil(width / cellSize);

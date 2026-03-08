@@ -151,10 +151,10 @@ export const WhorlCanvas = forwardRef((props, ref) => {
 
     useImperativeHandle(ref, () => ({
         getCanvas: () => {
-            return mergedCanvasRef.current?.canvas || null;
+            return mergedCanvasRef.current?.getTextureCanvas?.() || null;
         },
         getDotCircles: () => {
-            return mergedCanvasRef.current?.getDotCircles?.() || [];
+            return mergedCanvasRef.current?.getTextureDotCircles?.() || [];
         }
     }));
 
