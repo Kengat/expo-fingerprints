@@ -313,11 +313,11 @@ const fragmentShaderVector = `
   }
 `;
 
-export function generateStreamlines(params: FingerprintParams, width: number, height: number) {
-  const lineDensity = Math.max(4, params.lineDensity ?? 16);
+export function generateStreamlines(params: FingerprintParams, width: number, height: number, scale: number = 1) {
+  const lineDensity = Math.max(4, (params.lineDensity ?? 16) / scale);
   const dsep = lineDensity;
   const dtest = dsep * 0.75;
-  const step = 2;
+  const step = Math.max(0.5, 2 / scale);
 
   const cellSize = dsep;
   const cols = Math.ceil(width / cellSize);
@@ -337,17 +337,49 @@ export function generateStreamlines(params: FingerprintParams, width: number, he
     return theta;
   }
 
-  function isValid(x: number, y: number, lineId: number, currentIdx: number) {
-    if (x < 0 || x >= width || y < 0 || y >= height) return false;
+  function isValid(x: number, y: number, lineId: number, currentIdx: number, margin: number = 0) {
+    if (x < margin || x >= width - margin || y < margin || y >= height - margin) return false;
 
-    // Strict ellipse/squircle boundary check
-    const boundsX = params.boundsX ?? 0.7;
-    const boundsY = params.boundsY ?? 0.875;
-    const shapePower = params.shapePower ?? 2.0;
+    if (params.customPolygon && params.customPolygon.length >= 3) {
+      let inside = false;
+      for (let i = 0, j = params.customPolygon.length - 1; i < params.customPolygon.length; j = i++) {
+        const xi = params.customPolygon[i].x, yi = params.customPolygon[i].y;
+        const xj = params.customPolygon[j].x, yj = params.customPolygon[j].y;
+        const intersect = ((yi > y) !== (yj > y))
+            && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+      }
+      if (!inside) return false;
+      
+      // Rough margin check for custom polygon (check if we are too close to any edge)
+      if (margin > 0) {
+          for (let i = 0, j = params.customPolygon.length - 1; i < params.customPolygon.length; j = i++) {
+              const xi = params.customPolygon[i].x, yi = params.customPolygon[i].y;
+              const xj = params.customPolygon[j].x, yj = params.customPolygon[j].y;
+              // Distance from point to line segment
+              const l2 = (xj - xi)**2 + (yj - yi)**2;
+              if (l2 === 0) continue;
+              let t = ((x - xi) * (xj - xi) + (y - yi) * (yj - yi)) / l2;
+              t = Math.max(0, Math.min(1, t));
+              const projX = xi + t * (xj - xi);
+              const projY = yi + t * (yj - yi);
+              if (Math.hypot(x - projX, y - projY) < margin) return false;
+          }
+      }
+    } else {
+      // Strict ellipse/squircle boundary check
+      const boundsX = params.boundsX ?? 0.7;
+      const boundsY = params.boundsY ?? 0.875;
+      const shapePower = params.shapePower ?? 2.0;
 
-    const nx = (x - width / 2) / (width / 2 * boundsX);
-    const ny = (y - height * 0.625) / (height / 2 * boundsY);
-    if ((Math.pow(Math.abs(nx), shapePower) + Math.pow(Math.abs(ny), shapePower)) > 1.0) return false;
+      // Adjust bounds slightly inward if there is a margin
+      const marginX = margin / (width / 2);
+      const marginY = margin / (height / 2);
+
+      const nx = (x - width / 2) / (width / 2 * boundsX - marginX);
+      const ny = (y - height * 0.625) / (height / 2 * boundsY - marginY);
+      if ((Math.pow(Math.abs(nx), shapePower) + Math.pow(Math.abs(ny), shapePower)) > 1.0) return false;
+    }
 
     const c = Math.floor(x / cellSize);
     const r = Math.floor(y / cellSize);
@@ -356,7 +388,7 @@ export function generateStreamlines(params: FingerprintParams, width: number, he
     for (let i = Math.max(0, c - 1); i <= Math.min(cols - 1, c + 1); i++) {
       for (let j = Math.max(0, r - 1); j <= Math.min(rows - 1, r + 1); j++) {
         for (const pt of grid[i][j]) {
-          if (pt.lineId === lineId && Math.abs(pt.idx - currentIdx) < 10) continue;
+          if (pt.lineId === lineId && Math.abs(pt.idx - currentIdx) < (dtest / step * 2.5 + 10)) continue;
           const distSq = (pt.x - x) ** 2 + (pt.y - y) ** 2;
           if (distSq < dtest * dtest) return false;
         }
@@ -441,7 +473,17 @@ export const FingerprintStreamlines = forwardRef<HTMLCanvasElement, { params: Fi
 
     ctx.fillStyle = '#f5f5f5';
     ctx.beginPath();
-    ctx.ellipse(width / 2, height * 0.625, (width / 2) * 0.7, (height / 2) * 0.875, 0, 0, Math.PI * 2);
+    if (params.customPolygon && params.customPolygon.length >= 3) {
+        ctx.moveTo(params.customPolygon[0].x, params.customPolygon[0].y);
+        for (let i = 1; i < params.customPolygon.length; i++) {
+            ctx.lineTo(params.customPolygon[i].x, params.customPolygon[i].y);
+        }
+        ctx.closePath();
+    } else {
+        const boundsX = params.boundsX ?? 0.7;
+        const boundsY = params.boundsY ?? 0.875;
+        ctx.ellipse(width / 2, height * 0.625, (width / 2) * boundsX, (height / 2) * boundsY, 0, 0, Math.PI * 2);
+    }
     ctx.fill();
 
     const lines = generateStreamlines(params, width, height);
@@ -514,9 +556,14 @@ export const FingerprintStreamlines = forwardRef<HTMLCanvasElement, { params: Fi
         if (distSinceLastDot >= dotSpacing) {
           distSinceLastDot -= dotSpacing;
           const radius = getSize(p2.x, p2.y);
-          ctx.beginPath();
-          ctx.arc(p2.x, p2.y, radius, 0, Math.PI * 2);
-          ctx.fill();
+          
+          // Double check that the DOT ITSELF (including its radius) is fully inside the bounds
+          // to prevent edge bleeding
+          if (isValid(p2.x, p2.y, -1, -1, radius)) {
+              ctx.beginPath();
+              ctx.arc(p2.x, p2.y, radius, 0, Math.PI * 2);
+              ctx.fill();
+          }
         }
       }
     }
@@ -556,11 +603,16 @@ export const FingerprintStreamlines = forwardRef<HTMLCanvasElement, { params: Fi
       }
 
       let svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">\n`;
-      const cx = width / 2;
-      const cy = height * 0.625;
-      const rx = (width / 2) * 0.7;
-      const ry = (height / 2) * 0.875;
-      svgContent += `  <ellipse cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" rx="${rx.toFixed(2)}" ry="${ry.toFixed(2)}" fill="#f5f5f5" />\n`;
+      if (params.customPolygon && params.customPolygon.length >= 3) {
+          const points = params.customPolygon.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
+          svgContent += `  <polygon points="${points}" fill="#f5f5f5" />\n`;
+      } else {
+          const cx = width / 2;
+          const cy = height * 0.625;
+          const rx = (width / 2) * (params.boundsX ?? 0.7);
+          const ry = (height / 2) * (params.boundsY ?? 0.875);
+          svgContent += `  <ellipse cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" rx="${rx.toFixed(2)}" ry="${ry.toFixed(2)}" fill="#f5f5f5" />\n`;
+      }
 
       // 1. Draw grey lines
       if (lineThicknessMin === lineThicknessMax) {
@@ -592,7 +644,9 @@ export const FingerprintStreamlines = forwardRef<HTMLCanvasElement, { params: Fi
           if (distSinceLastDot >= dotSpacing) {
             distSinceLastDot -= dotSpacing;
             const radius = getSize(p2.x, p2.y);
-            svgContent += `  <circle cx="${p2.x.toFixed(2)}" cy="${p2.y.toFixed(2)}" r="${radius.toFixed(2)}" fill="#111111" />\n`;
+            if (isValid(p2.x, p2.y, -1, -1, radius)) {
+                svgContent += `  <circle cx="${p2.x.toFixed(2)}" cy="${p2.y.toFixed(2)}" r="${radius.toFixed(2)}" fill="#111111" />\n`;
+            }
           }
         }
       }
@@ -653,11 +707,12 @@ export interface FingerprintParams {
   boundsX?: number;
   boundsY?: number;
   shapePower?: number;
+  customPolygon?: Point[];
 }
 
 interface Props {
   params: FingerprintParams;
-  onPointChange: (name: keyof FingerprintParams, point: Point) => void;
+  onPointChange: (name: string, value: any) => void;
   width?: number;
   height?: number;
   variant?: 'realistic' | 'vector' | 'dots';
@@ -798,9 +853,9 @@ export function FingerprintGenerator({ params, onPointChange, width = 512, heigh
   });
 
   const svgRef = useRef<SVGSVGElement>(null);
-  const [dragging, setDragging] = useState<keyof FingerprintParams | null>(null);
+  const [dragging, setDragging] = useState<string | null>(null);
 
-  const handlePointerDown = (e: React.PointerEvent, name: keyof FingerprintParams) => {
+  const handlePointerDown = (e: React.PointerEvent, name: string) => {
     e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
     setDragging(name);
@@ -811,7 +866,15 @@ export function FingerprintGenerator({ params, onPointChange, width = 512, heigh
     const rect = svgRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    onPointChange(dragging, toWebgl(x, y));
+
+    if (dragging.startsWith('poly_')) {
+        const idx = parseInt(dragging.split('_')[1]);
+        const newPoly = [...(params.customPolygon || [])];
+        newPoly[idx] = { x: x * (512 / width), y: y * (512 / height) };
+        onPointChange('customPolygon', newPoly);
+    } else {
+        onPointChange(dragging, toWebgl(x, y));
+    }
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
@@ -853,12 +916,40 @@ export function FingerprintGenerator({ params, onPointChange, width = 512, heigh
         width={width}
         height={height}
         className="absolute inset-0 z-10"
-        style={{ pointerEvents: params.showPoints ? 'auto' : 'none' }}
+        style={{ pointerEvents: (params.showPoints || params.customPolygon) ? 'auto' : 'none' }}
       >
-        {renderPoint('core1', params.core1, '#ef4444', 'C1')}
-        {renderPoint('core2', params.core2, '#ef4444', 'C2')}
-        {renderPoint('delta1', params.delta1, '#3b82f6', 'D1')}
-        {renderPoint('delta2', params.delta2, '#3b82f6', 'D2')}
+        {params.customPolygon && (
+            <g>
+                <polygon 
+                    points={params.customPolygon.map(p => `${p.x * (width/512)},${p.y * (height/512)}`).join(' ')} 
+                    fill="rgba(16, 185, 129, 0.05)" 
+                    stroke="#10b981" 
+                    strokeWidth="2" 
+                    strokeDasharray="4 4"
+                />
+                {params.customPolygon.map((p, i) => (
+                    <g
+                        key={`poly_${i}`}
+                        transform={`translate(${p.x * (width/512)}, ${p.y * (height/512)})`}
+                        onPointerDown={(e) => handlePointerDown(e, `poly_${i}`)}
+                        onPointerMove={handlePointerMove}
+                        onPointerUp={handlePointerUp}
+                        className="cursor-grab active:cursor-grabbing"
+                    >
+                        <circle r={12} fill="transparent" stroke="#10b981" strokeWidth={2} />
+                        <circle r={5} fill="#10b981" />
+                    </g>
+                ))}
+            </g>
+        )}
+        {params.showPoints && (
+            <>
+                {renderPoint('core1', params.core1, '#ef4444', 'C1')}
+                {renderPoint('core2', params.core2, '#ef4444', 'C2')}
+                {renderPoint('delta1', params.delta1, '#3b82f6', 'D1')}
+                {renderPoint('delta2', params.delta2, '#3b82f6', 'D2')}
+            </>
+        )}
       </svg>
     </div>
   );

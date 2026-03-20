@@ -34,13 +34,15 @@ export function setupEnvironment(scene, p) {
   bgTexture = createGradientBackground(env.bg, env.ground);
   scene.background = bgTexture;
 
-  // Directional light (sun)
-  const sunAngleRad = THREE.MathUtils.degToRad(p.sunAngle);
+  // Directional light (sun) — spherical coords: elevation (sunAngle), azimuth (sunAzimuth)
+  const elevRad = THREE.MathUtils.degToRad(p.sunAngle);
+  const azimRad = THREE.MathUtils.degToRad(p.sunAzimuth);
+  const r = 50;
   sun = new THREE.DirectionalLight(new THREE.Color(env.sunColor), p.sunIntensity);
   sun.position.set(
-    50 * Math.cos(sunAngleRad),
-    50 * Math.sin(sunAngleRad),
-    -40
+    r * Math.cos(elevRad) * Math.sin(azimRad),
+    r * Math.sin(elevRad),
+    r * Math.cos(elevRad) * Math.cos(azimRad)
   );
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
@@ -87,11 +89,13 @@ export function updateEnvironment(scene, p) {
   scene.background = bgTexture;
 
   if (sun) {
-    const sunAngleRad = THREE.MathUtils.degToRad(p.sunAngle);
+    const elevRad = THREE.MathUtils.degToRad(p.sunAngle);
+    const azimRad = THREE.MathUtils.degToRad(p.sunAzimuth);
+    const r = 50;
     sun.position.set(
-      50 * Math.cos(sunAngleRad),
-      50 * Math.sin(sunAngleRad),
-      -40
+      r * Math.cos(elevRad) * Math.sin(azimRad),
+      r * Math.sin(elevRad),
+      r * Math.cos(elevRad) * Math.cos(azimRad)
     );
     sun.intensity = p.sunIntensity;
     sun.color.set(env.sunColor);

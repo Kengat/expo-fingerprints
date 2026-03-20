@@ -149,7 +149,8 @@ export function setupGUI(params, callbacks) {
   const env = gui.addFolder('Environment');
   env.add(params, 'envType', ['desert', 'green', 'evening', 'studio']).name('Environment').onChange(onParamChange);
   env.add(params, 'sunIntensity', 0, 10, 0.1).name('Sun Intensity').onChange(onParamChange);
-  env.add(params, 'sunAngle', 5, 85, 1).name('Sun Angle').onChange(onParamChange);
+  env.add(params, 'sunAngle', 5, 85, 1).name('Sun Elevation').onChange(onParamChange);
+  env.add(params, 'sunAzimuth', 0, 360, 1).name('Sun Position').onChange(onParamChange);
   env.add(params, 'fogDensity', 0, 0.02, 0.0005).name('Fog').onChange(onParamChange);
   env.addColor(params, 'groundColor').name('Ground Color').onChange(onParamChange);
   env.close();

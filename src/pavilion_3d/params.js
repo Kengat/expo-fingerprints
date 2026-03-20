@@ -108,7 +108,8 @@ export const params = {
   fogDensity: 0.003,
   groundColor: '#4a7c3f',
   sunIntensity: 3.0,
-  sunAngle: 135,
+  sunAngle: 45,
+  sunAzimuth: 225,
 
   // Postprocessing
   bloomStrength: 0.3,

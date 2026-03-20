@@ -34,6 +34,29 @@ function isInsideFingerprint(px: number, py: number, item: CanvasItem, cullingOf
     const nx = dx * cos - dy * sin;
     const ny = dx * sin + dy * cos;
 
+    const px_512 = nx + 256;
+    const py_512 = ny + 256;
+
+    if (item.params.customPolygon && item.params.customPolygon.length >= 3) {
+        let inside = false;
+        const poly = item.params.customPolygon;
+        
+        let cx = 0, cy = 0;
+        for (const p of poly) { cx += p.x; cy += p.y; }
+        cx /= poly.length; cy /= poly.length;
+
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const xi = cx + (poly[i].x - cx) * (1.0 + cullingOffset);
+            const yi = cy + (poly[i].y - cy) * (1.0 + cullingOffset);
+            const xj = cx + (poly[j].x - cx) * (1.0 + cullingOffset);
+            const yj = cy + (poly[j].y - cy) * (1.0 + cullingOffset);
+            const intersect = ((yi > py_512) !== (yj > py_512))
+                && (px_512 < (xj - xi) * (py_512 - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
     // 4. Bounding ellipse/squircle check
     const boundsX = item.params.boundsX ?? 0.7;
     const boundsY = item.params.boundsY ?? 0.875;
@@ -41,19 +64,139 @@ function isInsideFingerprint(px: number, py: number, item: CanvasItem, cullingOf
 
     const rx = 256 * boundsX;
     const ry = 256 * boundsY;
-    const cy = 64;
+    const cy_ellipse = 64; // Offset for the ellipse center
 
     const normX = nx / rx;
-    const normY = (ny - cy) / ry;
+    const normY = (ny - cy_ellipse) / ry;
 
-    const threshold = Math.pow(1.0 + cullingOffset, shapePower);
+    // To prevent dots from bleeding slightly outside the bounds due to their radius,
+    // we slightly tighten the threshold when checking if a point is inside.
+    const edgeBleedMargin = 0.05; 
+    const threshold = Math.pow(1.0 + cullingOffset - edgeBleedMargin, shapePower);
     return (Math.pow(Math.abs(normX), shapePower) + Math.pow(Math.abs(normY), shapePower)) <= threshold;
 }
 
+export const UV_SIZE = 2048;
+
 export type DotCircle = { x: number; y: number; r: number };
 
+export type EdgeDistanceField = {
+    field: Float32Array;
+    gridSize: number;
+} | null;
+
+/**
+ * Rasterizes the geometry's UV triangles as a filled mask,
+ * then computes a distance field: for each inside pixel, how far (in UV_SIZE units)
+ * it is from the nearest outside pixel (= nearest geometry edge).
+ * Outside pixels get Infinity (won't trigger culling).
+ */
+export function createGeometryEdgeDistField(geometry: any, gridSize: number = 256): EdgeDistanceField {
+    const uv = geometry.getAttribute('uv');
+    const index = geometry.getIndex();
+    if (!uv) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = gridSize;
+    canvas.height = gridSize;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.fillStyle = 'black';
+    ctx.fillRect(0, 0, gridSize, gridSize);
+
+    ctx.fillStyle = 'white';
+    const triCount = index ? index.count / 3 : uv.count / 3;
+    for (let t = 0; t < triCount; t++) {
+        const i0 = index ? index.getX(t * 3) : t * 3;
+        const i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1;
+        const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+
+        const u0 = uv.getX(i0) * gridSize;
+        const v0 = (1 - uv.getY(i0)) * gridSize;
+        const u1 = uv.getX(i1) * gridSize;
+        const v1 = (1 - uv.getY(i1)) * gridSize;
+        const u2 = uv.getX(i2) * gridSize;
+        const v2 = (1 - uv.getY(i2)) * gridSize;
+
+        ctx.beginPath();
+        ctx.moveTo(u0, v0);
+        ctx.lineTo(u1, v1);
+        ctx.lineTo(u2, v2);
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    const imageData = ctx.getImageData(0, 0, gridSize, gridSize);
+    const pixels = imageData.data;
+    const mask = new Uint8Array(gridSize * gridSize);
+    for (let i = 0; i < gridSize * gridSize; i++) {
+        mask[i] = pixels[i * 4] > 128 ? 1 : 0;
+    }
+
+    const INF = gridSize * 2;
+    const N = gridSize * gridSize;
+
+    function distTransform(src: Float32Array) {
+        for (let y = 0; y < gridSize; y++) {
+            for (let x = 0; x < gridSize; x++) {
+                const idx = y * gridSize + x;
+                if (y > 0) src[idx] = Math.min(src[idx], src[(y - 1) * gridSize + x] + 1);
+                if (x > 0) src[idx] = Math.min(src[idx], src[y * gridSize + x - 1] + 1);
+                if (y > 0 && x > 0) src[idx] = Math.min(src[idx], src[(y - 1) * gridSize + x - 1] + 1.414);
+                if (y > 0 && x < gridSize - 1) src[idx] = Math.min(src[idx], src[(y - 1) * gridSize + x + 1] + 1.414);
+            }
+        }
+        for (let y = gridSize - 1; y >= 0; y--) {
+            for (let x = gridSize - 1; x >= 0; x--) {
+                const idx = y * gridSize + x;
+                if (y < gridSize - 1) src[idx] = Math.min(src[idx], src[(y + 1) * gridSize + x] + 1);
+                if (x < gridSize - 1) src[idx] = Math.min(src[idx], src[y * gridSize + x + 1] + 1);
+                if (y < gridSize - 1 && x < gridSize - 1) src[idx] = Math.min(src[idx], src[(y + 1) * gridSize + x + 1] + 1.414);
+                if (y < gridSize - 1 && x > 0) src[idx] = Math.min(src[idx], src[(y + 1) * gridSize + x - 1] + 1.414);
+            }
+        }
+    }
+
+    const distIn = new Float32Array(N);
+    const distOut = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+        const x = i % gridSize;
+        const y = (i - x) / gridSize;
+        const onBorder = x === 0 || x === gridSize - 1 || y === 0 || y === gridSize - 1;
+        distIn[i] = (mask[i] === 0 || onBorder) ? 0 : INF;
+        distOut[i] = (mask[i] === 1 && !onBorder) ? 0 : INF;
+    }
+    distTransform(distIn);
+    distTransform(distOut);
+
+    const scale = UV_SIZE / gridSize;
+    const dist = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+        dist[i] = (mask[i] === 1 ? distIn[i] : distOut[i]) * scale;
+    }
+
+    return { field: dist, gridSize };
+}
+
+function sampleEdgeDistance(distField: EdgeDistanceField, worldX: number, worldY: number): number {
+    if (!distField) return Infinity;
+    const { field, gridSize } = distField;
+    const scale = UV_SIZE / gridSize;
+    const px = Math.floor(worldX / scale);
+    const py = Math.floor(worldY / scale);
+    if (px < 0 || px >= gridSize || py < 0 || py >= gridSize) return Infinity;
+    return field[py * gridSize + px];
+}
+
+function isNearGeometryEdge(distField: EdgeDistanceField, worldX: number, worldY: number, dotRadius: number, edgeCullRadius: number): boolean {
+    if (!distField) return false;
+    const dist = sampleEdgeDistance(distField, worldX, worldY);
+    return dist < dotRadius + edgeCullRadius;
+}
+
 // Compute a view that fits all items into the given canvas dimensions
-function computeFitView(items: CanvasItem[], canvasWidth: number, canvasHeight: number): { x: number; y: number; zoom: number } {
+export function computeFitView(items: CanvasItem[], canvasWidth: number, canvasHeight: number): { x: number; y: number; zoom: number } {
     if (items.length === 0) return { x: 0, y: 0, zoom: 1 };
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -87,13 +230,15 @@ function computeFitView(items: CanvasItem[], canvasWidth: number, canvasHeight: 
 }
 
 // Standalone rendering function used by both the visible canvas and the texture export
-function renderFingerprints(
+export function renderFingerprints(
     ctx: CanvasRenderingContext2D,
     items: CanvasItem[],
     view: { x: number; y: number; zoom: number },
     width: number,
     height: number,
     cullingOffset: number,
+    edgeCullRadius: number = 0,
+    edgeDistField: EdgeDistanceField = null,
 ) {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, width, height);
@@ -107,21 +252,23 @@ function renderFingerprints(
 
     for (let layerIndex = 0; layerIndex < items.length; layerIndex++) {
         const item = items[layerIndex];
-        const lines = generateStreamlines(item.params, 512, 512);
+        const lines = generateStreamlines(item.params, 512, 512, item.scale);
 
         const lineThicknessMin = item.params.lineThicknessMin ?? 3;
         const lineThicknessMax = item.params.lineThicknessMax ?? 3;
         const noiseScale = item.params.noiseScale ?? 10;
 
         function getLineThickness(lx: number, ly: number) {
-            if (lineThicknessMin === lineThicknessMax) return lineThicknessMin;
+            const scaledMin = lineThicknessMin / item.scale;
+            const scaledMax = lineThicknessMax / item.scale;
+            if (scaledMin === scaledMax) return scaledMin;
             const nx = (lx / 512) * 2 - 1;
             const ny = -((ly / 512) * 2 - 1);
             let v = 0;
             v += Math.sin(nx * noiseScale + item.params.seed + 10) * Math.cos(ny * noiseScale + item.params.seed + 10);
             v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed + 10) * Math.cos(ny * (noiseScale * 2) + item.params.seed + 10);
             v = (v + 1.5) / 3;
-            return lineThicknessMin + v * (lineThicknessMax - lineThicknessMin);
+            return scaledMin + v * (scaledMax - scaledMin);
         }
 
         const transformPoint = (lx: number, ly: number) => {
@@ -136,9 +283,9 @@ function renderFingerprints(
             return { x: nx, y: ny };
         };
 
-        const isCulled = (gx: number, gy: number) => {
+        const isCulled = (gx: number, gy: number, customOffset: number = cullingOffset) => {
             for (let aboveIndex = layerIndex + 1; aboveIndex < items.length; aboveIndex++) {
-                if (isInsideFingerprint(gx, gy, items[aboveIndex], cullingOffset)) {
+                if (isInsideFingerprint(gx, gy, items[aboveIndex], customOffset)) {
                     return true;
                 }
             }
@@ -153,10 +300,14 @@ function renderFingerprints(
                 const p2 = transformPoint(line[i].x, line[i].y);
 
                 if (!isCulled(p1.x, p1.y) && !isCulled(p2.x, p2.y)) {
+                    const lw = getLineThickness(line[i].x, line[i].y) * item.scale;
+                    const halfLw = lw / 2;
+                    if (isNearGeometryEdge(edgeDistField, p1.x, p1.y, halfLw, edgeCullRadius) ||
+                        isNearGeometryEdge(edgeDistField, p2.x, p2.y, halfLw, edgeCullRadius)) continue;
                     ctx.beginPath();
                     ctx.moveTo(p1.x, p1.y);
                     ctx.lineTo(p2.x, p2.y);
-                    ctx.lineWidth = getLineThickness(line[i].x, line[i].y) * item.scale;
+                    ctx.lineWidth = lw;
                     ctx.stroke();
                 }
             }
@@ -170,28 +321,35 @@ function renderFingerprints(
         const dotSizeMax = item.params.dotSizeMax ?? 6.0;
 
         function getSize(lx: number, ly: number) {
+            const scaledMin = dotSizeMin / item.scale;
+            const scaledMax = dotSizeMax / item.scale;
             const nx = (lx / 512) * 2 - 1;
             const ny = -((ly / 512) * 2 - 1);
             let v = 0;
             v += Math.sin(nx * noiseScale + item.params.seed) * Math.cos(ny * noiseScale + item.params.seed);
             v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed) * Math.cos(ny * (noiseScale * 2) + item.params.seed);
             v = (v + 1.5) / 3;
-            return dotSizeMin + v * (dotSizeMax - dotSizeMin);
+            return scaledMin + v * (scaledMax - scaledMin);
         }
 
+        const scaledDotSpacing = dotSpacing / item.scale;
+
         for (const line of lines) {
-            let distSinceLastDot = dotSpacing / 2;
+            let distSinceLastDot = scaledDotSpacing / 2;
             for (let i = 1; i < line.length; i++) {
                 const p1 = line[i - 1];
                 const p2 = line[i];
                 const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
                 distSinceLastDot += d;
-                if (distSinceLastDot >= dotSpacing) {
-                    distSinceLastDot -= dotSpacing;
+                if (distSinceLastDot >= scaledDotSpacing) {
+                    distSinceLastDot -= scaledDotSpacing;
 
                     const globalP2 = transformPoint(p2.x, p2.y);
-                    if (!isCulled(globalP2.x, globalP2.y)) {
-                        const radius = getSize(p2.x, p2.y) * item.scale;
+                    const baseRadius = getSize(p2.x, p2.y) * item.scale;
+                    const bleedMargin = baseRadius / 256;
+                    if (!isCulled(globalP2.x, globalP2.y, cullingOffset - bleedMargin) &&
+                        !isNearGeometryEdge(edgeDistField, globalP2.x, globalP2.y, baseRadius, edgeCullRadius)) {
+                        const radius = baseRadius;
                         ctx.beginPath();
                         ctx.arc(globalP2.x, globalP2.y, radius, 0, Math.PI * 2);
                         ctx.fill();
@@ -206,16 +364,18 @@ function renderFingerprints(
     ctx.restore();
 }
 
-function collectDotCircles(
+export function collectDotCircles(
     items: CanvasItem[],
     view: { x: number; y: number; zoom: number },
     cullingOffset: number,
+    edgeCullRadius: number = 0,
+    edgeDistField: EdgeDistanceField = null,
 ): DotCircle[] {
     const circles: DotCircle[] = [];
 
     for (let layerIndex = 0; layerIndex < items.length; layerIndex++) {
         const item = items[layerIndex];
-        const lines = generateStreamlines(item.params, 512, 512);
+        const lines = generateStreamlines(item.params, 512, 512, item.scale);
         const noiseScale = item.params.noiseScale ?? 10;
 
         const transformPoint = (lx: number, ly: number) => {
@@ -230,9 +390,9 @@ function collectDotCircles(
             return { x: nx, y: ny };
         };
 
-        const isCulled = (gx: number, gy: number) => {
+        const isCulled = (gx: number, gy: number, customOffset: number = cullingOffset) => {
             for (let aboveIndex = layerIndex + 1; aboveIndex < items.length; aboveIndex++) {
-                if (isInsideFingerprint(gx, gy, items[aboveIndex], cullingOffset)) {
+                if (isInsideFingerprint(gx, gy, items[aboveIndex], customOffset)) {
                     return true;
                 }
             }
@@ -244,27 +404,33 @@ function collectDotCircles(
         const dotSizeMax = item.params.dotSizeMax ?? 6.0;
 
         function getSize(lx: number, ly: number) {
+            const scaledMin = dotSizeMin / item.scale;
+            const scaledMax = dotSizeMax / item.scale;
             const nxl = (lx / 512) * 2 - 1;
             const nyl = -((ly / 512) * 2 - 1);
             let v = 0;
             v += Math.sin(nxl * noiseScale + item.params.seed) * Math.cos(nyl * noiseScale + item.params.seed);
             v += 0.5 * Math.sin(nxl * (noiseScale * 2) - item.params.seed) * Math.cos(nyl * (noiseScale * 2) + item.params.seed);
             v = (v + 1.5) / 3;
-            return dotSizeMin + v * (dotSizeMax - dotSizeMin);
+            return scaledMin + v * (scaledMax - scaledMin);
         }
 
+        const scaledDotSpacing = dotSpacing / item.scale;
+
         for (const line of lines) {
-            let distSinceLastDot = dotSpacing / 2;
+            let distSinceLastDot = scaledDotSpacing / 2;
             for (let i = 1; i < line.length; i++) {
                 const p1 = line[i - 1];
                 const p2 = line[i];
                 const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
                 distSinceLastDot += d;
-                if (distSinceLastDot >= dotSpacing) {
-                    distSinceLastDot -= dotSpacing;
+                if (distSinceLastDot >= scaledDotSpacing) {
+                    distSinceLastDot -= scaledDotSpacing;
                     const globalP2 = transformPoint(p2.x, p2.y);
-                    if (!isCulled(globalP2.x, globalP2.y)) {
-                        const baseRadius = getSize(p2.x, p2.y) * item.scale;
+                    const baseRadius = getSize(p2.x, p2.y) * item.scale;
+                    const bleedMargin = baseRadius / 256;
+                    if (!isCulled(globalP2.x, globalP2.y, cullingOffset - bleedMargin) &&
+                        !isNearGeometryEdge(edgeDistField, globalP2.x, globalP2.y, baseRadius, edgeCullRadius)) {
                         circles.push({
                             x: globalP2.x * view.zoom + view.x,
                             y: globalP2.y * view.zoom + view.y,
@@ -279,8 +445,32 @@ function collectDotCircles(
     return circles;
 }
 
-export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFingerprintsCanvasProps & { cullingOffset?: number }>(
-    function MergedFingerprintsCanvas({ items, view, width, height, cullingOffset = 0.05 }, ref) {
+export function getComputedItems(items: CanvasItem[], globalSettings: any): CanvasItem[] {
+    const gs = globalSettings.globalScale || 1.0;
+    return items.map(it => {
+        const dx = it.x - UV_SIZE / 2;
+        const dy = it.y - UV_SIZE / 2;
+        return {
+            ...it,
+            x: UV_SIZE / 2 + dx * gs,
+            y: UV_SIZE / 2 + dy * gs,
+            scale: it.scale * gs,
+            params: {
+                ...it.params,
+                dotSpacing: ((it.params.dotSpacing ?? 0) + (globalSettings.dotSpacing || 0)) * gs,
+                dotSizeMin: ((it.params.dotSizeMin ?? 0) + (globalSettings.dotSizeMin || 0)) * gs,
+                dotSizeMax: ((it.params.dotSizeMax ?? 0) + (globalSettings.dotSizeMax || 0)) * gs,
+                lineDensity: ((it.params.lineDensity ?? 0) + (globalSettings.lineDensity || 0)) * gs,
+                lineThicknessMin: (it.params.lineThicknessMin ?? 3) * gs,
+                lineThicknessMax: (it.params.lineThicknessMax ?? 3) * gs,
+                noiseScale: ((it.params.noiseScale ?? 0) + (globalSettings.noiseScale || 0)) / gs,
+            }
+        };
+    });
+}
+
+export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFingerprintsCanvasProps & { cullingOffset?: number; edgeCullRadius?: number; edgeDistField?: EdgeDistanceField }>(
+    function MergedFingerprintsCanvas({ items, view, width, height, cullingOffset = 0.05, edgeCullRadius = 0, edgeDistField = null }, ref) {
 
         const localRef = useRef<HTMLCanvasElement>(null);
         useImperativeHandle(ref, () => ({
@@ -288,44 +478,44 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
             // Returns an offscreen canvas rendered with a computed "fit all" view,
             // independent of the editor's current pan/zoom.
             getTextureCanvas: () => {
-                const texSize = Math.max(width, height, 2048);
+                const texSize = UV_SIZE;
                 const offscreen = document.createElement('canvas');
                 offscreen.width = texSize;
                 offscreen.height = texSize;
                 const ctx = offscreen.getContext('2d');
                 if (!ctx) return offscreen;
 
-                const fitView = computeFitView(items, texSize, texSize);
-                renderFingerprints(ctx, items, fitView, texSize, texSize, cullingOffset);
+                const fixedView = { x: 0, y: 0, zoom: 1 };
+                renderFingerprints(ctx, items, fixedView, texSize, texSize, cullingOffset, edgeCullRadius, edgeDistField);
                 return offscreen;
             },
-            // Returns dot circles using the same computed "fit all" view.
             getTextureDotCircles: () => {
-                const texSize = Math.max(width, height, 2048);
-                const fitView = computeFitView(items, texSize, texSize);
-                return collectDotCircles(items, fitView, cullingOffset);
+                const fixedView = { x: 0, y: 0, zoom: 1 };
+                return collectDotCircles(items, fixedView, cullingOffset, edgeCullRadius, edgeDistField);
             },
-            getDotCircles: () => collectDotCircles(items, view, cullingOffset),
+            getDotCircles: () => collectDotCircles(items, view, cullingOffset, edgeCullRadius, edgeDistField),
             downloadSVG: () => {
                 let svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">\n`;
                 svgContent += `  <rect width="100%" height="100%" fill="#f5f5f5" />\n`;
 
                 for (let layerIndex = 0; layerIndex < items.length; layerIndex++) {
                     const item = items[layerIndex];
-                    const lines = generateStreamlines(item.params, 512, 512);
+                    const lines = generateStreamlines(item.params, 512, 512, item.scale);
                     const lineThicknessMin = item.params.lineThicknessMin ?? 3;
                     const lineThicknessMax = item.params.lineThicknessMax ?? 3;
                     const noiseScale = item.params.noiseScale ?? 10;
 
                     function getLineThickness(lx: number, ly: number) {
-                        if (lineThicknessMin === lineThicknessMax) return lineThicknessMin;
+                        const scaledMin = lineThicknessMin / item.scale;
+                        const scaledMax = lineThicknessMax / item.scale;
+                        if (scaledMin === scaledMax) return scaledMin;
                         const nx = (lx / 512) * 2 - 1;
                         const ny = -((ly / 512) * 2 - 1);
                         let v = 0;
                         v += Math.sin(nx * noiseScale + item.params.seed + 10) * Math.cos(ny * noiseScale + item.params.seed + 10);
                         v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed + 10) * Math.cos(ny * (noiseScale * 2) + item.params.seed + 10);
                         v = (v + 1.5) / 3;
-                        return lineThicknessMin + v * (lineThicknessMax - lineThicknessMin);
+                        return scaledMin + v * (scaledMax - scaledMin);
                     }
 
                     const transformPoint = (lx: number, ly: number) => {
@@ -340,9 +530,9 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
                         return { x: nx, y: ny };
                     };
 
-                    const isCulled = (gx: number, gy: number) => {
+                    const isCulled = (gx: number, gy: number, customOffset: number = cullingOffset) => {
                         for (let aboveIndex = layerIndex + 1; aboveIndex < items.length; aboveIndex++) {
-                            if (isInsideFingerprint((gx - view.x) / view.zoom, (gy - view.y) / view.zoom, items[aboveIndex], cullingOffset)) {
+                            if (isInsideFingerprint((gx - view.x) / view.zoom, (gy - view.y) / view.zoom, items[aboveIndex], customOffset)) {
                                 return true;
                             }
                         }
@@ -354,13 +544,15 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
                     const dotSizeMax = item.params.dotSizeMax ?? 6.0;
 
                     function getSize(lx: number, ly: number) {
+                        const scaledMin = dotSizeMin / item.scale;
+                        const scaledMax = dotSizeMax / item.scale;
                         const nx = (lx / 512) * 2 - 1;
                         const ny = -((ly / 512) * 2 - 1);
                         let v = 0;
                         v += Math.sin(nx * noiseScale + item.params.seed) * Math.cos(ny * noiseScale + item.params.seed);
                         v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed) * Math.cos(ny * (noiseScale * 2) + item.params.seed);
                         v = (v + 1.5) / 3;
-                        return dotSizeMin + v * (dotSizeMax - dotSizeMin);
+                        return scaledMin + v * (scaledMax - scaledMin);
                     }
 
                     // 1. Draw Lines
@@ -377,6 +569,9 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
 
                             if (!isCulled(v1x, v1y) && !isCulled(v2x, v2y)) {
                                 const baseThickness = getLineThickness(line[i].x, line[i].y) * item.scale;
+                                const halfLw = baseThickness / 2;
+                                if (isNearGeometryEdge(edgeDistField, p1.x, p1.y, halfLw, edgeCullRadius) ||
+                                    isNearGeometryEdge(edgeDistField, p2.x, p2.y, halfLw, edgeCullRadius)) continue;
                                 const thickness = baseThickness * view.zoom;
                                 svgContent += `  <line x1="${v1x.toFixed(2)}" y1="${v1y.toFixed(2)}" x2="${v2x.toFixed(2)}" y2="${v2y.toFixed(2)}" stroke="#b0b0b0" stroke-width="${thickness.toFixed(2)}" stroke-linecap="round" />\n`;
                             }
@@ -384,23 +579,28 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
                     }
 
                     // 2. Draw Dots
+                    const scaledDotSpacing = dotSpacing / item.scale;
                     for (const line of lines) {
-                        let distSinceLastDot = dotSpacing / 2;
+                        let distSinceLastDot = scaledDotSpacing / 2;
                         for (let i = 1; i < line.length; i++) {
                             const p1 = line[i - 1];
                             const p2 = line[i];
                             const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
                             distSinceLastDot += d;
-                            if (distSinceLastDot >= dotSpacing) {
-                                distSinceLastDot -= dotSpacing;
+                            if (distSinceLastDot >= scaledDotSpacing) {
+                                distSinceLastDot -= scaledDotSpacing;
 
                                 const globalP2 = transformPoint(p2.x, p2.y);
                                 const v2x = globalP2.x * view.zoom + view.x;
                                 const v2y = globalP2.y * view.zoom + view.y;
 
-                                if (!isCulled(v2x, v2y)) {
-                                    const baseRadius = getSize(p2.x, p2.y) * item.scale;
-                                    const radius = baseRadius * view.zoom;
+                                const baseRadius = getSize(p2.x, p2.y) * item.scale;
+                                const radius = baseRadius * view.zoom;
+
+                                // Use a slightly tighter culling offset to prevent dots from bleeding over the edge
+                                const bleedMargin = baseRadius / 256;
+                                if (!isCulled(v2x, v2y, cullingOffset - bleedMargin) &&
+                                    !isNearGeometryEdge(edgeDistField, globalP2.x, globalP2.y, baseRadius, edgeCullRadius)) {
                                     svgContent += `  <circle cx="${v2x.toFixed(2)}" cy="${v2y.toFixed(2)}" r="${radius.toFixed(2)}" fill="#111111" />\n`;
                                 }
                             }
@@ -425,8 +625,8 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
             const ctx = canvas.getContext('2d');
             if (!ctx) return;
 
-            renderFingerprints(ctx, items, view, width, height, cullingOffset);
-        }, [items, view, width, height]);
+            renderFingerprints(ctx, items, view, width, height, cullingOffset, edgeCullRadius, edgeDistField);
+        }, [items, view, width, height, edgeCullRadius, edgeDistField]);
 
         return <canvas ref={localRef} width={width} height={height} className="absolute inset-0 pointer-events-none" />;
     }

@@ -357,10 +357,17 @@ function normalizeGeometry(geometry, targetHeight = 15) {
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     const scale = targetHeight / maxDim;
 
+    // Store the full transform so export can reverse it to original coordinates
+    geometry.userData.importTransform = {
+        centerX: center.x, centerY: center.y, centerZ: center.z,
+        scale: scale,
+        targetHeight: targetHeight,
+    };
+
     const pos = geometry.getAttribute('position');
     for (let i = 0; i < pos.count; i++) {
         pos.setX(i, (pos.getX(i) - center.x) * scale);
-        pos.setY(i, (pos.getY(i) - center.y) * scale + targetHeight / 2); // lift so bottom sits at y=0
+        pos.setY(i, (pos.getY(i) - center.y) * scale + targetHeight / 2);
         pos.setZ(i, (pos.getZ(i) - center.z) * scale);
     }
     pos.needsUpdate = true;

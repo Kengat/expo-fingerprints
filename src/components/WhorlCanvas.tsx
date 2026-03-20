@@ -2,16 +2,11 @@ import React, { useState, useRef, useEffect, forwardRef, useImperativeHandle } f
 import { FingerprintGenerator, Point } from './FingerprintGenerator';
 import { RotateCw, Plus, Trash2, Save, FolderOpen, RotateCcw } from 'lucide-react';
 import { DEFAULT_PARAMS, DEFAULT_DOTS_PARAMS, PRESETS, FingerprintParams } from '../presets';
-import { MergedFingerprintsCanvas } from './MergedFingerprintsCanvas';
+import { MergedFingerprintsCanvas, UV_SIZE, getComputedItems } from './MergedFingerprintsCanvas';
+import type { CanvasItem, EdgeDistanceField } from './MergedFingerprintsCanvas';
+export type { CanvasItem };
 
-type CanvasItem = {
-    id: string;
-    x: number;
-    y: number;
-    rotation: number;
-    scale: number;
-    params: FingerprintParams;
-};
+// CanvasItem type is now imported from MergedFingerprintsCanvas
 
 type DragAction =
     | { type: 'pan', startX: number, startY: number, viewStartX: number, viewStartY: number }
@@ -39,8 +34,18 @@ type SavedPattern = {
     globalSettings: any;
 };
 
-export const WhorlCanvas = forwardRef((props, ref) => {
-    const [items, setItems] = useState<CanvasItem[]>(() => {
+interface WhorlCanvasProps {
+    externalItems?: CanvasItem[];
+    onItemsChange?: (items: CanvasItem[]) => void;
+    externalGlobalSettings?: any;
+    onGlobalSettingsChange?: (settings: any) => void;
+    baseGeometry?: any;
+    edgeDistField?: EdgeDistanceField;
+}
+
+export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
+    const { externalItems, onItemsChange, externalGlobalSettings, onGlobalSettingsChange, edgeDistField = null } = props;
+    const [internalItems, setInternalItems] = useState<CanvasItem[]>(() => {
         const saved = localStorage.getItem(STORAGE_KEY_CURRENT);
         if (saved) {
             try {
@@ -51,22 +56,31 @@ export const WhorlCanvas = forwardRef((props, ref) => {
         return [
             {
                 id: 'initial',
-                x: window.innerWidth / 2,
-                y: (window.innerHeight - 80) / 2,
+                x: 1024,
+                y: 1024,
                 rotation: 0,
                 scale: 1,
                 params: { ...LOCAL_DEFAULT_DOTS_PARAMS, seed: Math.random() }
             }
         ];
     });
+    const items = externalItems ?? internalItems;
+    const setItems = onItemsChange ?? setInternalItems;
     const [selectedId, setSelectedId] = useState<string | null>(items[0]?.id || null);
-    const [view, setView] = useState({ x: 0, y: 0, zoom: 1 });
+    const [view, setView] = useState(() => {
+        const initialZoom = Math.min(window.innerWidth, window.innerHeight) / UV_SIZE * 0.8;
+        return { 
+            x: window.innerWidth / 2 - (UV_SIZE / 2) * initialZoom, 
+            y: window.innerHeight / 2 - (UV_SIZE / 2) * initialZoom, 
+            zoom: initialZoom 
+        };
+    });
     const [dragAction, setDragAction] = useState<DragAction>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const mergedCanvasRef = useRef<any>(null);
     const isOverPanel = useRef(false);
 
-    const [globalSettings, setGlobalSettings] = useState(() => {
+    const [internalGlobalSettings, setInternalGlobalSettings] = useState(() => {
         const saved = localStorage.getItem(STORAGE_KEY_CURRENT);
         if (saved) {
             try {
@@ -76,13 +90,17 @@ export const WhorlCanvas = forwardRef((props, ref) => {
         }
         return {
             cullingOffset: 0.05,
+            edgeCullRadius: 0,
             dotSpacing: 12.5,
             dotSizeMin: 2.4,
             dotSizeMax: 4.2,
             lineDensity: 14,
             noiseScale: 7,
+            globalScale: 1.0,
         };
     });
+    const globalSettings = externalGlobalSettings ?? internalGlobalSettings;
+    const setGlobalSettings = onGlobalSettingsChange ?? setInternalGlobalSettings;
 
     const [savedPatterns, setSavedPatterns] = useState<SavedPattern[]>(() => {
         const saved = localStorage.getItem(STORAGE_KEY_SAVED);
@@ -131,8 +149,8 @@ export const WhorlCanvas = forwardRef((props, ref) => {
         setItems([
             {
                 id: 'initial',
-                x: window.innerWidth / 2,
-                y: (window.innerHeight - 80) / 2,
+                x: 1024,
+                y: 1024,
                 rotation: 0,
                 scale: 1,
                 params: { ...LOCAL_DEFAULT_DOTS_PARAMS, seed: Math.random() }
@@ -140,11 +158,13 @@ export const WhorlCanvas = forwardRef((props, ref) => {
         ]);
         setGlobalSettings({
             cullingOffset: 0.05,
+            edgeCullRadius: 0,
             dotSpacing: 12.5,
             dotSizeMin: 2.4,
             dotSizeMax: 4.2,
             lineDensity: 14,
             noiseScale: 7,
+            globalScale: 1.0,
         });
         setSelectedId('initial');
     };
@@ -160,6 +180,7 @@ export const WhorlCanvas = forwardRef((props, ref) => {
 
     const handlePointerMove = (e: React.PointerEvent) => {
         if (!dragAction) return;
+        const gs = globalSettings.globalScale || 1.0;
 
         if (dragAction.type === 'pan') {
             setView({
@@ -172,8 +193,8 @@ export const WhorlCanvas = forwardRef((props, ref) => {
                 if (it.id !== dragAction.id) return it;
                 return {
                     ...it,
-                    x: dragAction.itemStartX + (e.clientX - dragAction.startX) / view.zoom,
-                    y: dragAction.itemStartY + (e.clientY - dragAction.startY) / view.zoom,
+                    x: dragAction.itemStartX + (e.clientX - dragAction.startX) / (view.zoom * gs),
+                    y: dragAction.itemStartY + (e.clientY - dragAction.startY) / (view.zoom * gs),
                 };
             }));
         } else if (dragAction.type === 'rotate') {
@@ -223,6 +244,76 @@ export const WhorlCanvas = forwardRef((props, ref) => {
         return () => div.removeEventListener('wheel', handleWheel);
     }, [view]);
 
+    const uvCanvasRef = useRef<HTMLCanvasElement>(null);
+
+    const [dimensions, setDimensions] = useState({ width: window.innerWidth, height: window.innerHeight });
+
+    useEffect(() => {
+        const handleResize = () => {
+            setDimensions({ width: window.innerWidth, height: window.innerHeight });
+        };
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+    }, []);
+
+    useEffect(() => {
+        const handleResize = () => {
+            setDimensions({ width: window.innerWidth, height: window.innerHeight });
+        };
+        window.addEventListener('resize', handleResize);
+        return () => window.removeEventListener('resize', handleResize);
+    }, []);
+
+    // Draw UV boundaries
+    useEffect(() => {
+        const canvas = uvCanvasRef.current;
+        if (!canvas || !props.baseGeometry) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const uv = props.baseGeometry.getAttribute('uv');
+        const index = props.baseGeometry.getIndex();
+        if (!uv) return;
+
+        ctx.save();
+        ctx.translate(view.x, view.y);
+        ctx.scale(view.zoom, view.zoom);
+
+        // Draw the 2048x2048 bounding box
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
+        ctx.lineWidth = 2 / view.zoom;
+        ctx.strokeRect(0, 0, UV_SIZE, UV_SIZE);
+
+        // Draw the UV triangles
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.05)';
+        ctx.lineWidth = 1 / view.zoom;
+        
+        const triCount = index ? index.count / 3 : uv.count / 3;
+        
+        ctx.beginPath();
+        for (let t = 0; t < triCount; t++) {
+            const i0 = index ? index.getX(t * 3) : t * 3;
+            const i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1;
+            const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+
+            const u0 = uv.getX(i0) * UV_SIZE;
+            const v0 = (1 - uv.getY(i0)) * UV_SIZE;
+            const u1 = uv.getX(i1) * UV_SIZE;
+            const v1 = (1 - uv.getY(i1)) * UV_SIZE;
+            const u2 = uv.getX(i2) * UV_SIZE;
+            const v2 = (1 - uv.getY(i2)) * UV_SIZE;
+
+            ctx.moveTo(u0, v0);
+            ctx.lineTo(u1, v1);
+            ctx.lineTo(u2, v2);
+            ctx.lineTo(u0, v0);
+        }
+        ctx.stroke();
+        ctx.restore();
+    }, [props.baseGeometry, view, dimensions]);
+
     // Explicitly stop wheel propagation from side panels to prevent zooming
     useEffect(() => {
         const panels = containerRef.current?.querySelectorAll('.no-scrollbar');
@@ -241,8 +332,8 @@ export const WhorlCanvas = forwardRef((props, ref) => {
         setItems(items.map(it => it.id === selectedId ? { ...it, params: { ...it.params, [name]: value } } : it));
     };
 
-    const handlePointChange = (id: string, name: keyof FingerprintParams, point: Point) => {
-        setItems(items.map(it => it.id === id ? { ...it, params: { ...it.params, [name]: point } } : it));
+    const handlePointChange = (id: string, name: string, value: any) => {
+        setItems(items.map(it => it.id === id ? { ...it, params: { ...it.params, [name]: value } } : it));
     };
 
     const handlePreset = (presetName: keyof typeof PRESETS) => {
@@ -252,16 +343,16 @@ export const WhorlCanvas = forwardRef((props, ref) => {
 
     const addNew = () => {
         const id = Math.random().toString(36).substr(2, 9);
-        const x = (-view.x + window.innerWidth / 2) / view.zoom;
-        const y = (-view.y + window.innerHeight / 2) / view.zoom;
+        const x = (-view.x + dimensions.width / 2) / view.zoom;
+        const y = (-view.y + dimensions.height / 2) / view.zoom;
         setItems([...items, { id, x, y, rotation: 0, scale: 1, params: { ...LOCAL_DEFAULT_DOTS_PARAMS, seed: Math.random() } }]);
         setSelectedId(id);
     };
 
     const addNewRandom = () => {
         const id = Math.random().toString(36).substr(2, 9);
-        const x = (-view.x + window.innerWidth / 2) / view.zoom + (Math.random() - 0.5) * 100;
-        const y = (-view.y + window.innerHeight / 2) / view.zoom + (Math.random() - 0.5) * 100;
+        const x = (-view.x + dimensions.width / 2) / view.zoom + (Math.random() - 0.5) * 100;
+        const y = (-view.y + dimensions.height / 2) / view.zoom + (Math.random() - 0.5) * 100;
 
         const coreSpreadX = Math.random() > 0.7 ? 0.6 : 0.15;
         const coreSpreadY = Math.random() > 0.7 ? 0.5 : 0.15;
@@ -292,17 +383,7 @@ export const WhorlCanvas = forwardRef((props, ref) => {
         setSelectedId(null);
     };
 
-    const computedItems = items.map(it => ({
-        ...it,
-        params: {
-            ...it.params,
-            dotSpacing: (it.params.dotSpacing ?? 0) + globalSettings.dotSpacing,
-            dotSizeMin: (it.params.dotSizeMin ?? 0) + globalSettings.dotSizeMin,
-            dotSizeMax: (it.params.dotSizeMax ?? 0) + globalSettings.dotSizeMax,
-            lineDensity: (it.params.lineDensity ?? 0) + globalSettings.lineDensity,
-            noiseScale: (it.params.noiseScale ?? 0) + globalSettings.noiseScale,
-        }
-    }));
+    const computedItems = getComputedItems(items, globalSettings);
 
     return (
         <div className="relative w-full h-[calc(100vh-140px)] overflow-hidden bg-[#f5f5f5] border border-black/10 rounded-2xl shadow-xl flex"
@@ -329,9 +410,19 @@ export const WhorlCanvas = forwardRef((props, ref) => {
                 ref={mergedCanvasRef}
                 items={computedItems}
                 view={view}
-                width={window.innerWidth}
-                height={window.innerHeight}
+                width={dimensions.width}
+                height={dimensions.height}
                 cullingOffset={globalSettings.cullingOffset}
+                edgeCullRadius={globalSettings.edgeCullRadius ?? 0}
+                edgeDistField={edgeDistField}
+            />
+
+            {/* UV Map Guide Layer */}
+            <canvas
+                ref={uvCanvasRef}
+                width={dimensions.width}
+                height={dimensions.height}
+                className="absolute inset-0 pointer-events-none opacity-50 mix-blend-multiply z-0"
             />
 
             <div
@@ -357,10 +448,11 @@ export const WhorlCanvas = forwardRef((props, ref) => {
                                 onPointerDown={(e) => {
                                     e.stopPropagation();
                                     setSelectedId(item.id);
-                                    setDragAction({ type: 'move', id: item.id, startX: e.clientX, startY: e.clientY, itemStartX: item.x, itemStartY: item.y });
+                                    const origItem = items.find(it => it.id === item.id) || item;
+                                    setDragAction({ type: 'move', id: item.id, startX: e.clientX, startY: e.clientY, itemStartX: origItem.x, itemStartY: origItem.y });
                                 }}
                             >
-                                {isSelected && item.params.showPoints && (
+                                {isSelected && (item.params.showPoints || item.params.customPolygon) && (
                                     <FingerprintGenerator
                                         params={item.params}
                                         onPointChange={(name, pt) => handlePointChange(item.id, name, pt)}
@@ -382,7 +474,8 @@ export const WhorlCanvas = forwardRef((props, ref) => {
                                             const cx = rect.left + rect.width / 2;
                                             const cy = rect.top + rect.height / 2;
                                             const startAngle = Math.atan2(e.clientY - cy, e.clientX - cx);
-                                            setDragAction({ type: 'rotate', id: item.id, startAngle, itemStartRotation: item.rotation, centerX: cx, centerY: cy });
+                                            const origItem = items.find(it => it.id === item.id) || item;
+                                            setDragAction({ type: 'rotate', id: item.id, startAngle, itemStartRotation: origItem.rotation, centerX: cx, centerY: cy });
                                         }}
                                     >
                                         <RotateCw className="w-4 h-4" />
@@ -402,7 +495,8 @@ export const WhorlCanvas = forwardRef((props, ref) => {
                                                 const cx = rect.left + rect.width / 2;
                                                 const cy = rect.top + rect.height / 2;
                                                 const startDist = Math.hypot(e.clientX - cx, e.clientY - cy);
-                                                setDragAction({ type: 'scale', id: item.id, startDist, itemStartScale: item.scale, centerX: cx, centerY: cy });
+                                                const origItem = items.find(it => it.id === item.id) || item;
+                                                setDragAction({ type: 'scale', id: item.id, startDist, itemStartScale: origItem.scale, centerX: cx, centerY: cy });
                                             }}
                                         />
                                     ))}
@@ -420,6 +514,32 @@ export const WhorlCanvas = forwardRef((props, ref) => {
                         <Trash2 className="w-3 h-3" />
                         Delete
                     </button>
+                    {selectedItem && (
+                        <button 
+                            onClick={() => {
+                                if (!selectedItem.params.customPolygon) {
+                                    const boundsX = selectedItem.params.boundsX ?? 0.7;
+                                    const boundsY = selectedItem.params.boundsY ?? 0.875;
+                                    const cx = 256;
+                                    const cy = 512 * 0.625;
+                                    const rx = 256 * boundsX;
+                                    const ry = 256 * boundsY;
+                                    const poly = [];
+                                    for (let i = 0; i < 8; i++) {
+                                        const angle = (i / 8) * Math.PI * 2;
+                                        poly.push({ x: cx + Math.cos(angle) * rx, y: cy + Math.sin(angle) * ry });
+                                    }
+                                    handleParamChange('customPolygon', poly);
+                                    // Removed the forced showPoints=true so they can be toggled independently
+                                } else {
+                                    handleParamChange('customPolygon', undefined);
+                                }
+                            }}
+                            className="flex items-center justify-center gap-1 bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-500 px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-wide font-bold transition-colors whitespace-nowrap"
+                        >
+                            {selectedItem.params.customPolygon ? 'Reset Shape' : 'Custom Shape'}
+                        </button>
+                    )}
                 </div>
 
                 <div className="w-px bg-white/10 self-stretch mx-1" />
@@ -576,6 +696,14 @@ export const WhorlCanvas = forwardRef((props, ref) => {
                     <h3 className="text-white text-xs font-semibold opacity-90 pb-1.5 border-b border-white/10">Base Global Parameters</h3>
 
                     <div className="space-y-3">
+                        <div className="space-y-1 mb-3 pb-3 border-b border-white/10">
+                            <div className="flex justify-between text-[10px]">
+                                <span className="text-blue-400 font-bold">Global Scale</span>
+                                <span className="font-mono text-blue-400">{(globalSettings.globalScale || 1.0).toFixed(2)}x</span>
+                            </div>
+                            <input type="range" min="0.1" max="3" step="0.05" value={globalSettings.globalScale || 1.0} onChange={e => setGlobalSettings((s: any) => ({ ...s, globalScale: parseFloat(e.target.value) }))} className="w-full accent-blue-500" />
+                        </div>
+
                         <div className="space-y-1">
                             <div className="flex justify-between text-[10px]">
                                 <span className="text-gray-300">Dot Spacing</span>
@@ -632,6 +760,25 @@ export const WhorlCanvas = forwardRef((props, ref) => {
                             />
                             <div className="text-[9px] text-gray-500 leading-tight mt-1">
                                 Increases cut severity under prints.
+                            </div>
+                        </div>
+
+                        <div className="mt-3 pt-3 border-t border-white/10 space-y-1">
+                            <div className="flex justify-between text-[10px]">
+                                <span className="text-amber-400">Edge Cull Radius</span>
+                                <span className="font-mono text-gray-400">{(globalSettings.edgeCullRadius ?? 0).toFixed(0)}px</span>
+                            </div>
+                            <input
+                                type="range"
+                                min="0"
+                                max="80"
+                                step="1"
+                                value={globalSettings.edgeCullRadius ?? 0}
+                                onChange={e => setGlobalSettings((s: any) => ({ ...s, edgeCullRadius: parseFloat(e.target.value) }))}
+                                className="w-full accent-amber-500"
+                            />
+                            <div className="text-[9px] text-gray-500 leading-tight mt-1">
+                                Removes dots near geometry edges. 0 = only dots touching the edge line.
                             </div>
                         </div>
                     </div>
