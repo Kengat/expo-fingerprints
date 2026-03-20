@@ -313,6 +313,47 @@ const fragmentShaderVector = `
   }
 `;
 
+export function isInsideBounds(x: number, y: number, params: FingerprintParams, width: number, height: number, margin: number = 0): boolean {
+  if (x < margin || x >= width - margin || y < margin || y >= height - margin) return false;
+
+  if (params.customPolygon && params.customPolygon.length >= 3) {
+    let inside = false;
+    for (let i = 0, j = params.customPolygon.length - 1; i < params.customPolygon.length; j = i++) {
+      const xi = params.customPolygon[i].x, yi = params.customPolygon[i].y;
+      const xj = params.customPolygon[j].x, yj = params.customPolygon[j].y;
+      const intersect = ((yi > y) !== (yj > y))
+          && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+    }
+    if (!inside) return false;
+
+    if (margin > 0) {
+      for (let i = 0, j = params.customPolygon.length - 1; i < params.customPolygon.length; j = i++) {
+        const xi = params.customPolygon[i].x, yi = params.customPolygon[i].y;
+        const xj = params.customPolygon[j].x, yj = params.customPolygon[j].y;
+        const l2 = (xj - xi)**2 + (yj - yi)**2;
+        if (l2 === 0) continue;
+        let t = ((x - xi) * (xj - xi) + (y - yi) * (yj - yi)) / l2;
+        t = Math.max(0, Math.min(1, t));
+        const projX = xi + t * (xj - xi);
+        const projY = yi + t * (yj - yi);
+        if (Math.hypot(x - projX, y - projY) < margin) return false;
+      }
+    }
+  } else {
+    const boundsX = params.boundsX ?? 0.7;
+    const boundsY = params.boundsY ?? 0.875;
+    const shapePower = params.shapePower ?? 2.0;
+    const marginX = margin / (width / 2);
+    const marginY = margin / (height / 2);
+    const nx = (x - width / 2) / (width / 2 * boundsX - marginX);
+    const ny = (y - height * 0.625) / (height / 2 * boundsY - marginY);
+    if ((Math.pow(Math.abs(nx), shapePower) + Math.pow(Math.abs(ny), shapePower)) > 1.0) return false;
+  }
+
+  return true;
+}
+
 export function generateStreamlines(params: FingerprintParams, width: number, height: number, scale: number = 1) {
   const lineDensity = Math.max(4, (params.lineDensity ?? 16) / scale);
   const dsep = lineDensity;
@@ -559,7 +600,7 @@ export const FingerprintStreamlines = forwardRef<HTMLCanvasElement, { params: Fi
           
           // Double check that the DOT ITSELF (including its radius) is fully inside the bounds
           // to prevent edge bleeding
-          if (isValid(p2.x, p2.y, -1, -1, radius)) {
+          if (isInsideBounds(p2.x, p2.y, params, width, height, radius)) {
               ctx.beginPath();
               ctx.arc(p2.x, p2.y, radius, 0, Math.PI * 2);
               ctx.fill();
@@ -644,7 +685,7 @@ export const FingerprintStreamlines = forwardRef<HTMLCanvasElement, { params: Fi
           if (distSinceLastDot >= dotSpacing) {
             distSinceLastDot -= dotSpacing;
             const radius = getSize(p2.x, p2.y);
-            if (isValid(p2.x, p2.y, -1, -1, radius)) {
+            if (isInsideBounds(p2.x, p2.y, params, width, height, radius)) {
                 svgContent += `  <circle cx="${p2.x.toFixed(2)}" cy="${p2.y.toFixed(2)}" r="${radius.toFixed(2)}" fill="#111111" />\n`;
             }
           }
