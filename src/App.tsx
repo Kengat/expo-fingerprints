@@ -5,13 +5,15 @@
 
 import React, { useState, useRef } from 'react';
 import * as THREE from 'three';
-import { Fingerprint, MonitorPlay, X, Box, Save, FolderOpen, Waves } from 'lucide-react';
+import { Fingerprint, MonitorPlay, X, Box, Save, FolderOpen, Waves, Circle } from 'lucide-react';
 import { Pavilion3D } from './components/Pavilion3D';
 import type { Pavilion3DHandle } from './components/Pavilion3D';
 import { WhorlCanvas } from './components/WhorlCanvas';
 import { FabricCanvas } from './components/FabricCanvas';
 import type { FabricItem } from './components/FabricCanvas';
 import { FingerprintEditor3D } from './components/FingerprintEditor3D.tsx';
+import { MetaballEditor3D } from './components/MetaballEditor3D';
+import type { MetaballData } from './components/MetaballEditor3D';
 import { MergedFingerprintsCanvas, computeFitView, renderFingerprints, UV_SIZE, collectDotCircles, getComputedItems, createGeometryEdgeDistField } from './components/MergedFingerprintsCanvas';
 import type { DotCircle, CanvasItem, EdgeDistanceField } from './components/MergedFingerprintsCanvas';
 import { DEFAULT_DOTS_PARAMS, FingerprintParams } from './presets';
@@ -76,6 +78,8 @@ export default function App() {
   const [isEditingFabric, setIsEditingFabric] = useState(false);
   const [isEditing3D, setIsEditing3D] = useState(false);
   const [fabricEnabled, setFabricEnabled] = useState(false);
+  const [isEditingMetaballs, setIsEditingMetaballs] = useState(false);
+  const [metaballs, setMetaballs] = useState<MetaballData[]>([]);
   const [fabricItems, setFabricItems] = useState<FabricItem[]>([]);
   const [fingerprintCanvas, setFingerprintCanvas] = useState<HTMLCanvasElement | null>(null);
   const [bakeHolesTrigger, setBakeHolesTrigger] = useState<number>(0);
@@ -273,6 +277,15 @@ export default function App() {
         />
       )}
 
+      {/* Metaball Editor Overlay */}
+      {isEditingMetaballs && (
+        <MetaballEditor3D
+          pavilion3DRef={pavilion3DRef}
+          balls={metaballs}
+          onBallsChange={setMetaballs}
+        />
+      )}
+
       {/* Main 3D HUD (Visible only when NOT editing 2D pattern) */}
       {!isEditingPattern && !isEditingFabric && (
         <>
@@ -309,6 +322,17 @@ export default function App() {
           >
             <Fingerprint className="w-5 h-5" />
             Bake 3D Holes
+          </button>
+          <button
+            onClick={() => setIsEditingMetaballs(!isEditingMetaballs)}
+            className={`flex items-center gap-3 px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all font-medium border ${
+              isEditingMetaballs
+                ? 'bg-cyan-500 hover:bg-cyan-400 border-cyan-300/50 text-white'
+                : 'bg-cyan-700 hover:bg-cyan-600 border-cyan-400/30 text-white'
+            }`}
+          >
+            <Circle className="w-5 h-5" />
+            {isEditingMetaballs ? 'Exit Metaballs' : 'Edit Metaballs'}
           </button>
           <button
             onClick={() => setFabricEnabled(!fabricEnabled)}
