@@ -16,6 +16,8 @@ interface Pavilion3DProps {
     dotCircles?: DotCircle[];
     onBaseGeometryUpdate?: (geom: THREE.BufferGeometry | null) => void;
     editing3D?: boolean;
+    fabricEnabled?: boolean;
+    fabricItems?: any[];
 }
 
 export interface Pavilion3DHandle {
@@ -28,7 +30,7 @@ export interface Pavilion3DHandle {
     } | null;
 }
 
-export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, dotCircles = [], onBaseGeometryUpdate, editing3D = false }, ref) {
+export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, dotCircles = [], onBaseGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [] }, ref) {
     const mountRef = useRef<HTMLDivElement>(null);
     const onBaseGeomRef = useRef(onBaseGeometryUpdate);
     onBaseGeomRef.current = onBaseGeometryUpdate;
@@ -187,6 +189,8 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
         } : null,
     }), []);
 
+    const lastBakeTriggerRef = useRef(0);
+
     useEffect(() => {
         if (engineRef.current && fingerprintCanvas && engineRef.current.params.skinType === 'fingerprint') {
             const tex = new THREE.CanvasTexture(fingerprintCanvas);
@@ -203,20 +207,27 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
             engineRef.current.params._fingerprintCanvasWidth = fingerprintCanvas.width;
             engineRef.current.params._fingerprintCanvasHeight = fingerprintCanvas.height;
             
-            const isBake = bakeHolesTrigger > 0;
-            engineRef.current.params.bakeHoles = isBake;
+            const isNewBake = bakeHolesTrigger > 0 && bakeHolesTrigger !== lastBakeTriggerRef.current;
+            if (isNewBake) {
+                lastBakeTriggerRef.current = bakeHolesTrigger;
+            }
+            engineRef.current.params.bakeHoles = isNewBake;
 
-            if (editing3D && !isBake) {
+            if (isNewBake) {
+                // Full rebuild with CSG holes
+                const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
+                onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
+            } else if (editing3D) {
                 // Fast path for live 3D editing: just update the texture without rebuilding geometry
-                let shellMesh = null;
-                engineRef.current.scene.traverse((child) => {
+                let shellMesh: any = null;
+                engineRef.current.scene.traverse((child: any) => {
                     if (child.name === 'pavilion-shell' && child.isMesh) {
                         shellMesh = child;
                     }
                 });
                 if (shellMesh && shellMesh.material) {
                     if (Array.isArray(shellMesh.material)) {
-                        shellMesh.material.forEach(m => {
+                        shellMesh.material.forEach((m: any) => {
                             m.alphaMap = tex;
                             m.alphaTest = 0.1;
                             m.transparent = true;
@@ -230,7 +241,7 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                     }
                 }
             } else {
-                // Full rebuild for bake or initial apply
+                // Non-bake rebuild (preview, texture-only apply)
                 const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
                 onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
             }
@@ -240,6 +251,25 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
             }
         }
     }, [fingerprintCanvas, bakeHolesTrigger, dotCircles, editing3D]);
+
+    useEffect(() => {
+        if (engineRef.current) {
+            let needsUpdate = false;
+            if (engineRef.current.params.fabricEnabled !== fabricEnabled) {
+                engineRef.current.params.fabricEnabled = fabricEnabled;
+                needsUpdate = true;
+            }
+            if (engineRef.current.params.fabricItems !== fabricItems) {
+                engineRef.current.params.fabricItems = fabricItems;
+                if (fabricEnabled) needsUpdate = true;
+            }
+            
+            if (needsUpdate) {
+                const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
+                onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
+            }
+        }
+    }, [fabricEnabled, fabricItems]);
 
     return (
         <div

@@ -84,6 +84,15 @@ export const params = {
   scatterAlignToNormal: true,
   scatterColor: '#f4d03f',
 
+  // Fabric Drape
+  fabricEnabled: false,
+  fabricLines: 60,
+  fabricWaviness: 2.0,
+  fabricNoiseFreq: 0.1,
+  fabricTopHeight: 50.0,
+  fabricColor: '#ffffff',
+  fabricOpacity: 0.85,
+
   // Composition
   compositionMode: 'single',
   copyCount: 3,

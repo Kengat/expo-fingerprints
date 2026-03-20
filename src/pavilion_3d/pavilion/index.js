@@ -4,6 +4,7 @@ import { applyDeformations } from './deform.js';
 import { createRibs, createColumns } from './structure.js';
 import { applySkin } from './skin.js';
 import { createScatter } from './scatter.js';
+import { createFabricDrape } from './fabric.js';
 import { generateUVCheckerTexture } from '../utils/importModel.js';
 // import { Evaluator, Brush, SUBTRACTION } from 'three-bvh-csg'; // Removed in favor of manifold-3d
 
@@ -560,6 +561,18 @@ function buildSinglePavilion(p) {
 
   const scatter = createScatter(shellGeom, p);
   if (scatter) pavilionGroup.add(scatter);
+
+  let fabricSceneOriginY;
+  if (p.importMode && p._importedGeometry) {
+    const t = p._importedGeometry.userData?.importTransform;
+    if (t) {
+      const is = p.importScale || 1;
+      fabricSceneOriginY = (-t.centerY * t.scale + t.targetHeight / 2) * is;
+    }
+  }
+
+  const fabric = createFabricDrape(p, shellGeom, fabricSceneOriginY);
+  if (fabric) pavilionGroup.add(fabric);
 
   return pavilionGroup;
 }

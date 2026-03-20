@@ -5,10 +5,12 @@
 
 import React, { useState, useRef } from 'react';
 import * as THREE from 'three';
-import { Fingerprint, MonitorPlay, X, Box, Save, FolderOpen } from 'lucide-react';
+import { Fingerprint, MonitorPlay, X, Box, Save, FolderOpen, Waves } from 'lucide-react';
 import { Pavilion3D } from './components/Pavilion3D';
 import type { Pavilion3DHandle } from './components/Pavilion3D';
 import { WhorlCanvas } from './components/WhorlCanvas';
+import { FabricCanvas } from './components/FabricCanvas';
+import type { FabricItem } from './components/FabricCanvas';
 import { FingerprintEditor3D } from './components/FingerprintEditor3D.tsx';
 import { MergedFingerprintsCanvas, computeFitView, renderFingerprints, UV_SIZE, collectDotCircles, getComputedItems, createGeometryEdgeDistField } from './components/MergedFingerprintsCanvas';
 import type { DotCircle, CanvasItem, EdgeDistanceField } from './components/MergedFingerprintsCanvas';
@@ -71,7 +73,10 @@ export default function App() {
   const [globalSettings, setGlobalSettings] = useState(loadInitialGlobalSettings);
 
   const [isEditingPattern, setIsEditingPattern] = useState(false);
+  const [isEditingFabric, setIsEditingFabric] = useState(false);
   const [isEditing3D, setIsEditing3D] = useState(false);
+  const [fabricEnabled, setFabricEnabled] = useState(false);
+  const [fabricItems, setFabricItems] = useState<FabricItem[]>([]);
   const [fingerprintCanvas, setFingerprintCanvas] = useState<HTMLCanvasElement | null>(null);
   const [bakeHolesTrigger, setBakeHolesTrigger] = useState<number>(0);
   const [dotCircles, setDotCircles] = useState<DotCircle[]>([]);
@@ -101,7 +106,7 @@ export default function App() {
       if (ctx) {
         const computedItems = getComputedItems(items, globalSettings);
         const fixedView = { x: 0, y: 0, zoom: texSize / UV_SIZE };
-        renderFingerprints(ctx, computedItems, fixedView, texSize, texSize, globalSettings.cullingOffset, globalSettings.edgeCullRadius ?? 0, edgeDistField);
+        renderFingerprints(ctx, computedItems, fixedView, texSize, texSize, globalSettings.cullingOffset, globalSettings.edgeCullRadius ?? 0, edgeDistField, globalSettings);
         setFingerprintCanvas(offscreen);
       }
     }
@@ -122,7 +127,7 @@ export default function App() {
     if (ctx) {
       const computed = getComputedItems(items, globalSettings);
       const fixedView = { x: 0, y: 0, zoom: 1 };
-      renderFingerprints(ctx, computed, fixedView, texSize, texSize, globalSettings.cullingOffset, cur, edgeDistField);
+      renderFingerprints(ctx, computed, fixedView, texSize, texSize, globalSettings.cullingOffset, cur, edgeDistField, globalSettings);
       setFingerprintCanvas(offscreen);
     }
   }, [globalSettings.edgeCullRadius, edgeDistField]);
@@ -137,10 +142,10 @@ export default function App() {
     const fixedView = { x: 0, y: 0, zoom: 1 };
     
     if (ctx) {
-        renderFingerprints(ctx, computed, fixedView, texSize, texSize, currentSettings.cullingOffset, currentSettings.edgeCullRadius ?? 0, edgeDistField);
+        renderFingerprints(ctx, computed, fixedView, texSize, texSize, currentSettings.cullingOffset, currentSettings.edgeCullRadius ?? 0, edgeDistField, currentSettings);
     }
     
-    const circles = collectDotCircles(computed, fixedView, currentSettings.cullingOffset, currentSettings.edgeCullRadius ?? 0, edgeDistField);
+    const circles = collectDotCircles(computed, fixedView, currentSettings.cullingOffset, currentSettings.edgeCullRadius ?? 0, edgeDistField, currentSettings);
     return { canvas: offscreen, circles };
   };
 
@@ -245,7 +250,7 @@ export default function App() {
     <div className="relative w-screen h-screen overflow-hidden bg-[#1a1a1a] text-white font-sans">
 
       {/* 3D Background Layer */}
-      <div className={`absolute inset-0 transition-opacity duration-500 ${isEditingPattern ? 'opacity-20 pointer-events-none' : 'opacity-100'}`}>
+      <div className={`absolute inset-0 transition-opacity duration-500 ${isEditingPattern || isEditingFabric ? 'opacity-20 pointer-events-none' : 'opacity-100'}`}>
         <Pavilion3D
           ref={pavilion3DRef}
           fingerprintCanvas={fingerprintCanvas}
@@ -253,6 +258,8 @@ export default function App() {
           dotCircles={dotCircles}
           onBaseGeometryUpdate={setBaseGeometry}
           editing3D={isEditing3D}
+          fabricEnabled={fabricEnabled}
+          fabricItems={fabricItems}
         />
       </div>
 
@@ -267,7 +274,7 @@ export default function App() {
       )}
 
       {/* Main 3D HUD (Visible only when NOT editing 2D pattern) */}
-      {!isEditingPattern && (
+      {!isEditingPattern && !isEditingFabric && (
         <>
         <div className="absolute top-6 left-6 z-20 flex flex-col gap-3">
           <button
@@ -276,6 +283,13 @@ export default function App() {
           >
             <Fingerprint className="w-5 h-5" />
             Edit Surface Pattern
+          </button>
+          <button
+            onClick={() => setIsEditingFabric(true)}
+            className="flex items-center gap-3 bg-pink-600 hover:bg-pink-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(236,72,153,0.3)] transition-all font-medium border border-pink-400/30"
+          >
+            <Waves className="w-5 h-5" />
+            Edit Fabric Pattern
           </button>
           <button
             onClick={() => setIsEditing3D(!isEditing3D)}
@@ -295,6 +309,17 @@ export default function App() {
           >
             <Fingerprint className="w-5 h-5" />
             Bake 3D Holes
+          </button>
+          <button
+            onClick={() => setFabricEnabled(!fabricEnabled)}
+            className={`flex items-center gap-3 px-6 py-3 rounded-xl shadow-lg transition-all font-medium border ${
+              fabricEnabled
+                ? 'bg-pink-500 hover:bg-pink-400 border-pink-300/50 text-white'
+                : 'bg-slate-700 hover:bg-slate-600 border-slate-500/50 text-white'
+            }`}
+          >
+            <Waves className="w-5 h-5" />
+            {fabricEnabled ? 'Hide Fabric Drape' : 'Show Fabric Drape'}
           </button>
           <div className="flex gap-3 mt-2">
             <button
@@ -394,8 +419,41 @@ export default function App() {
         </div>
       )}
 
+      {/* Fabric Editor Overlay */}
+      {isEditingFabric && (
+        <div className="absolute inset-0 z-30 flex flex-col bg-[#151619]/95 backdrop-blur-md">
+          {/* Top Bar */}
+          <div className="h-16 border-b border-white/10 px-6 flex items-center justify-between bg-[#1C1D21]">
+            <div className="flex items-center gap-3">
+              <Waves className="w-6 h-6 text-pink-400" />
+              <h1 className="text-xl font-medium tracking-tight">Fabric Drape Editor</h1>
+            </div>
+
+            <div className="flex gap-4">
+              <button
+                onClick={() => setIsEditingFabric(false)}
+                className="flex items-center gap-2 text-gray-400 hover:text-white px-4 py-2 hover:bg-white/5 rounded-lg transition-colors"
+              >
+                <X className="w-4 h-4" />
+                Close
+              </button>
+            </div>
+          </div>
+
+          {/* Editor Workspace */}
+          <div className="flex-1 w-full relative">
+            <FabricCanvas
+              externalItems={fabricItems}
+              onItemsChange={setFabricItems}
+              baseGeometry={baseGeometry}
+              radius={globalSettings.radiusBottom || 20}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Info footer */}
-      {!isEditingPattern && (
+      {!isEditingPattern && !isEditingFabric && (
         <div id="info" className="absolute bottom-5 left-1/2 -translate-x-1/2 text-white/50 text-xs tracking-widest uppercase pointer-events-none">
           EXPO 2030 Riyadh Pavilion — Parametric Design Tool
         </div>

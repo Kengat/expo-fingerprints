@@ -306,7 +306,9 @@ export async function applyUVMethod(geometry, method) {
         );
 
         console.log('[SmartUV] Unwrapping geometry...');
+        const savedImportTransform = geometry.userData.importTransform;
         await unwrapper.unwrapGeometry(geometry);
+        if (savedImportTransform) geometry.userData.importTransform = savedImportTransform;
         console.log('[SmartUV] UV unwrapping complete.');
 
         if (geometry.attributes.uv) {

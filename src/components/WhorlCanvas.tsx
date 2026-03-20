@@ -415,6 +415,7 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                 cullingOffset={globalSettings.cullingOffset}
                 edgeCullRadius={globalSettings.edgeCullRadius ?? 0}
                 edgeDistField={edgeDistField}
+                globalSettings={globalSettings}
             />
 
             {/* UV Map Guide Layer */}
@@ -780,6 +781,66 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                             <div className="text-[9px] text-gray-500 leading-tight mt-1">
                                 Removes dots near geometry edges. 0 = only dots touching the edge line.
                             </div>
+                        </div>
+
+                        {/* Background Settings */}
+                        <div className="mt-3 pt-3 border-t border-white/10 space-y-3">
+                            <label className="flex items-center gap-2 cursor-pointer">
+                                <input 
+                                    type="checkbox" 
+                                    checked={!!globalSettings.enableVerticalBackground} 
+                                    onChange={e => setGlobalSettings((s: any) => ({ ...s, enableVerticalBackground: e.target.checked }))}
+                                    className="rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500"
+                                />
+                                <span className="text-white text-xs font-semibold opacity-90">Vertical Background</span>
+                            </label>
+
+                            {globalSettings.enableVerticalBackground && (
+                                <div className="space-y-3 pl-2 border-l-2 border-white/10">
+                                    <div className="space-y-1">
+                                        <div className="flex justify-between text-[10px]">
+                                            <span className="text-gray-300">Rotation</span>
+                                            <span className="font-mono text-gray-400">{(globalSettings.bgRotation ?? 0).toFixed(0)}°</span>
+                                        </div>
+                                        <input type="range" min="-180" max="180" step="1" value={globalSettings.bgRotation ?? 0} onChange={e => setGlobalSettings((s: any) => ({ ...s, bgRotation: parseFloat(e.target.value) }))} className="w-full accent-blue-500" />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <div className="flex justify-between text-[10px]">
+                                            <span className="text-gray-300">Spacing</span>
+                                            <span className="font-mono text-gray-400">{(globalSettings.bgSpacing ?? 16.0).toFixed(1)}</span>
+                                        </div>
+                                        <input type="range" min="5" max="50" step="0.5" value={globalSettings.bgSpacing ?? 16.0} onChange={e => setGlobalSettings((s: any) => ({ ...s, bgSpacing: parseFloat(e.target.value) }))} className="w-full accent-blue-500" />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <div className="flex justify-between text-[10px]">
+                                            <span className="text-gray-300">Line Density</span>
+                                            <span className="font-mono text-gray-400">{(globalSettings.bgLineDensity ?? 31.0).toFixed(1)}</span>
+                                        </div>
+                                        <input type="range" min="4" max="60" step="1" value={globalSettings.bgLineDensity ?? 31.0} onChange={e => setGlobalSettings((s: any) => ({ ...s, bgLineDensity: parseFloat(e.target.value) }))} className="w-full accent-blue-500" />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <div className="flex justify-between text-[10px]">
+                                            <span className="text-gray-300">Min Dot Size</span>
+                                            <span className="font-mono text-gray-400">{(globalSettings.bgDotSizeMin ?? 1.5).toFixed(1)}</span>
+                                        </div>
+                                        <input type="range" min="0.5" max="4" step="0.1" value={globalSettings.bgDotSizeMin ?? 1.5} onChange={e => setGlobalSettings((s: any) => ({ ...s, bgDotSizeMin: parseFloat(e.target.value) }))} className="w-full accent-blue-500" />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <div className="flex justify-between text-[10px]">
+                                            <span className="text-gray-300">Max Dot Size</span>
+                                            <span className="font-mono text-gray-400">{(globalSettings.bgDotSizeMax ?? 4.0).toFixed(1)}</span>
+                                        </div>
+                                        <input type="range" min="2" max="10" step="0.1" value={globalSettings.bgDotSizeMax ?? 4.0} onChange={e => setGlobalSettings((s: any) => ({ ...s, bgDotSizeMax: parseFloat(e.target.value) }))} className="w-full accent-blue-500" />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <div className="flex justify-between text-[10px]">
+                                            <span className="text-gray-300">Noise Scale</span>
+                                            <span className="font-mono text-gray-400">{(globalSettings.bgNoiseScale ?? 7.0).toFixed(1)}</span>
+                                        </div>
+                                        <input type="range" min="2" max="20" step="1" value={globalSettings.bgNoiseScale ?? 7.0} onChange={e => setGlobalSettings((s: any) => ({ ...s, bgNoiseScale: parseFloat(e.target.value) }))} className="w-full accent-blue-500" />
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
