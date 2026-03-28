@@ -1,5 +1,45 @@
 import * as THREE from 'three';
 import { createNoise2D } from 'simplex-noise';
+import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+
+/* ── Build a raycastable mesh from metaball data ── */
+const MC_SCALE = 20;
+const MC_RESOLUTION = 60;
+
+function buildMetaballMesh(metaballs) {
+  const mat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+  const mc = new MarchingCubes(MC_RESOLUTION, mat, false, false, 80000);
+  mc.isolation = 80;
+  mc.position.set(0, MC_SCALE, 0);
+  mc.scale.setScalar(MC_SCALE);
+
+  for (const b of metaballs) {
+    const nx = b.x / MC_SCALE * 0.5 + 0.5;
+    const ny = (b.y - MC_SCALE) / MC_SCALE * 0.5 + 0.5;
+    const nz = b.z / MC_SCALE * 0.5 + 0.5;
+    const mcStrength = b.radius * b.radius * b.strength;
+    mc.addBall(nx, ny, nz, mcStrength, 12);
+  }
+  mc.update();
+  mc.updateMatrixWorld(true);
+
+  // Extract into a static mesh for reliable raycasting
+  const posAttr = mc.geometry.getAttribute('position');
+  const drawVerts = mc.geometry.drawRange.count || (mc.count * 3); // Three.js MarchingCubes usually uses drawRange
+  const geom = new THREE.BufferGeometry();
+  const arr = new Float32Array(drawVerts * 3);
+  for (let i = 0; i < drawVerts * 3; i++) arr[i] = posAttr.array[i];
+  geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+  geom.computeBoundingSphere();
+
+  const mesh = new THREE.Mesh(geom, mat);
+  // Apply same transform as the visual MarchingCubes
+  mesh.position.set(0, MC_SCALE, 0);
+  mesh.scale.setScalar(MC_SCALE);
+  mesh.updateMatrixWorld(true);
+
+  return { mesh, dispose() { geom.dispose(); mat.dispose(); mc.geometry.dispose(); } };
+}
 
 export function createFabricDrape(p, baseGeometry, sceneOriginY) {
   const group = new THREE.Group();
@@ -36,6 +76,16 @@ export function createFabricDrape(p, baseGeometry, sceneOriginY) {
 
   // Use custom items from the canvas if available, otherwise generate default ones
   const items = p.fabricItems && p.fabricItems.length > 0 ? p.fabricItems : [];
+  const metaballs = p.metaballs && p.metaballs.length > 0 ? p.metaballs : null;
+
+  // Build a raycastable metaball mesh once for all fabric items
+  let mbMesh = null, mbDispose = null;
+  const mbRaycaster = new THREE.Raycaster();
+  if (metaballs) {
+    const mb = buildMetaballMesh(metaballs);
+    mbMesh = mb.mesh;
+    mbDispose = mb.dispose;
+  }
 
   for (const item of items) {
     const segments = 200; // High resolution for smooth drape
@@ -106,8 +156,29 @@ export function createFabricDrape(p, baseGeometry, sceneOriginY) {
       if (intersects.length > 0) {
         // The fabric hangs DOWN from the geometry
         const topY = intersects[0].point.y;
-        const bottomY = fabricBottomY;
-        
+        let bottomY = fabricBottomY;
+
+        // Clip against metaballs by raycasting downward onto the metaball mesh
+        if (mbMesh) {
+          const mbOrigin = new THREE.Vector3(x, topY, waveZ);
+          const mbDir = new THREE.Vector3(0, -1, 0);
+          mbRaycaster.set(mbOrigin, mbDir);
+          mbRaycaster.far = topY - fabricBottomY + 1;
+          const mbHits = mbRaycaster.intersectObject(mbMesh, false);
+          if (mbHits.length > 0) {
+            const hitY = mbHits[0].point.y;
+            if (hitY >= topY - 0.01) {
+              // Metaball surface is at or above the attachment point — skip segment
+              if (currentStrip.length > 0) {
+                strips.push(currentStrip);
+                currentStrip = [];
+              }
+              continue;
+            }
+            bottomY = hitY;
+          }
+        }
+
         currentStrip.push({ x, topY, bottomY, z: waveZ, u: j / segments });
       } else {
         // If we were building a strip and hit a gap, save the strip and start a new one
@@ -169,6 +240,8 @@ export function createFabricDrape(p, baseGeometry, sceneOriginY) {
       group.add(mesh);
     }
   }
+
+  if (mbDispose) mbDispose();
 
   return group;
 }

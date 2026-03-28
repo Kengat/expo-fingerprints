@@ -143,3 +143,52 @@ export function exportSTL(scene, params) {
     URL.revokeObjectURL(url);
   });
 }
+
+export function exportFabricSTL(scene, params) {
+  const rootGroup = findRootGroup(scene);
+  const bakePromise = getBakePromise(rootGroup);
+
+  bakePromise.then(() => {
+    let fabricGroup = null;
+    scene.traverse((child) => {
+      if (child.name === 'fabric-drape') fabricGroup = child;
+    });
+
+    if (!fabricGroup) {
+      alert("No fabric drape found!");
+      return;
+    }
+
+    const inv = buildImportInverseMatrix(params);
+    
+    // Apply inverse transform to all fabric meshes so they match the original imported scale
+    if (inv) {
+      fabricGroup.traverse((child) => {
+        if (child.isMesh && child.geometry) {
+           child.geometry.applyMatrix4(inv);
+        }
+      });
+    }
+
+    const exporter = new STLExporter();
+    const result = exporter.parse(fabricGroup);
+
+    // Restore transforms
+    if (inv) {
+      const fwd = inv.clone().invert();
+      fabricGroup.traverse((child) => {
+        if (child.isMesh && child.geometry) {
+           child.geometry.applyMatrix4(fwd);
+        }
+      });
+    }
+
+    const blob = new Blob([result], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.download = `fabric-drape-${Date.now()}.stl`;
+    link.href = url;
+    link.click();
+    URL.revokeObjectURL(url);
+  });
+}

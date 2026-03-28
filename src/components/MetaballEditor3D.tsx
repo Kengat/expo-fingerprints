@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import * as THREE from 'three';
 import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import type { Pavilion3DHandle } from './Pavilion3D';
 
 /* ───── Types ───── */
@@ -22,7 +23,7 @@ interface Props {
 
 /* ───── Constants ───── */
 
-const MC_RESOLUTION = 48;
+const MC_RESOLUTION = 60;
 const MC_SCALE = 20;           // world-unit bounding box half-extent
 const HELPER_COLOR = 0x44ccff;
 const SELECTED_COLOR = 0xff44aa;
@@ -40,9 +41,7 @@ export function MetaballEditor3D({ pavilion3DRef, balls, onBallsChange }: Props)
   const mouse = useRef(new THREE.Vector2());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const draggingRef = useRef(false);
-  const dragPlaneRef = useRef(new THREE.Plane());
-  const dragOffsetRef = useRef(new THREE.Vector3());
+  const tControlRef = useRef<TransformControls | null>(null);
   const ballsRef = useRef(balls);
   ballsRef.current = balls;
   const selectedIdRef = useRef(selectedId);
@@ -54,7 +53,6 @@ export function MetaballEditor3D({ pavilion3DRef, balls, onBallsChange }: Props)
     if (!engine) return;
     const { scene } = engine;
 
-    // Material for the metaball surface
     const mat = new THREE.MeshPhysicalMaterial({
       color: 0xccddff,
       metalness: 0.1,
@@ -63,31 +61,93 @@ export function MetaballEditor3D({ pavilion3DRef, balls, onBallsChange }: Props)
       opacity: 0.85,
       side: THREE.DoubleSide,
       envMapIntensity: 0.6,
+      depthWrite: true,
     });
 
     const mc = new MarchingCubes(MC_RESOLUTION, mat, true, true, 80000);
+    mc.frustumCulled = false; // Prevent it from randomly disappearing during dynamic updates
+    mc.isolation = 80;
     mc.position.set(0, MC_SCALE, 0);
     mc.scale.setScalar(MC_SCALE);
     mc.enableUvs = false;
     mc.enableColors = false;
     mc.name = 'metaballs-mc';
-    scene.add(mc);
+
+    const wrapperGroup = new THREE.Group();
+    wrapperGroup.name = 'metaballs-wrapper';
+    wrapperGroup.add(mc);
     mcRef.current = mc;
 
     const helpersGroup = helpersGroupRef.current;
     helpersGroup.name = 'metaballs-helpers';
-    scene.add(helpersGroup);
+    wrapperGroup.add(helpersGroup);
+    scene.add(wrapperGroup);
+
+    // Keep wrapper transform synced with dynamic pavilion root
+    let rAFId = 0;
+    const syncTransform = () => {
+      rAFId = window.requestAnimationFrame(syncTransform);
+      let tParent = null as THREE.Object3D | null;
+      scene.traverse((child) => {
+        if (child.name === 'pavilion-shell' && child.parent) {
+          tParent = child.parent;
+        }
+      });
+      if (tParent) {
+        wrapperGroup.position.copy(tParent.position);
+        wrapperGroup.quaternion.copy(tParent.quaternion);
+        wrapperGroup.scale.copy(tParent.scale);
+      }
+    };
+    syncTransform();
+
+    let isDraggingGizmo = false;
+    let lastDragTime = 0;
+    const tControl = new TransformControls(engine.camera, engine.renderer.domElement);
+    tControl.size = 1.0; // Ensure gizmo is visible
+    tControl.setSpace('local'); // Recommended for working within rotated parents
+
+    tControl.addEventListener('dragging-changed', (event) => {
+      engine.controls.enabled = !event.value;
+      isDraggingGizmo = event.value;
+      if (!isDraggingGizmo && tControl.object && selectedIdRef.current) {
+        // Final explicit save on drop
+        const pos = tControl.object.position;
+        onBallsChange(ballsRef.current.map(b =>
+          b.id === selectedIdRef.current
+            ? { ...b, x: pos.x, y: pos.y, z: pos.z }
+            : b
+        ));
+      }
+    });
+    tControl.addEventListener('change', () => {
+      if (!isDraggingGizmo || !tControl.object || !selectedIdRef.current) return;
+      const now = performance.now();
+      if (now - lastDragTime < 30) return; // Throttle to roughly 30fps to avoid lag
+      lastDragTime = now;
+      
+      const pos = tControl.object.position;
+      onBallsChange(ballsRef.current.map(b =>
+        b.id === selectedIdRef.current
+          ? { ...b, x: pos.x, y: pos.y, z: pos.z }
+          : b
+      ));
+    });
+    scene.add(tControl.getHelper());
+    tControlRef.current = tControl;
 
     return () => {
-      scene.remove(mc);
+      window.cancelAnimationFrame(rAFId);
+      scene.remove(wrapperGroup);
       mc.geometry.dispose();
       mat.dispose();
-      scene.remove(helpersGroup);
       helpersGroup.children.forEach(c => {
         if ((c as any).geometry) (c as any).geometry.dispose();
         if ((c as any).material) (c as any).material.dispose();
       });
       helpersGroup.clear();
+      tControl.dispose();
+      scene.remove(tControl.getHelper());
       mcRef.current = null;
     };
   }, [pavilion3DRef]);
@@ -113,25 +173,57 @@ export function MetaballEditor3D({ pavilion3DRef, balls, onBallsChange }: Props)
     }
     mc.update();
 
-    // Rebuild wire-sphere helpers
+    // Update wire-sphere helpers
     const group = helpersGroupRef.current;
-    group.children.forEach(c => {
-      if ((c as any).geometry) (c as any).geometry.dispose();
-      if ((c as any).material) (c as any).material.dispose();
-    });
-    group.clear();
+    const currentIds = new Set(balls.map(b => b.id));
+
+    // Remove obsolete helpers
+    for (let i = group.children.length - 1; i >= 0; i--) {
+      const c = group.children[i];
+      if (!currentIds.has(c.userData.ballId)) {
+        if (tControlRef.current && tControlRef.current.object === c) tControlRef.current.detach();
+        if ((c as any).geometry) (c as any).geometry.dispose();
+        if ((c as any).material) (c as any).material.dispose();
+        group.remove(c);
+      }
+    }
 
     for (const b of balls) {
-      // Wireframe radius approximates the visible MC surface size
-      const visRadius = b.radius * MC_SCALE;
-      const geom = new THREE.SphereGeometry(visRadius, 16, 12);
+      // Wireframe radius must exactly math the MarchingCubes local field distance formula!
+      // (strength / dist^2) - 12 (subtract) = 80 (isolation) => dist = sqrt(strength / 92)
+      // True world radius is local coordinate width (2 * MC_SCALE) * dist.
+      const mcStrength = b.radius * b.radius * b.strength;
+      const visRadius = 2 * MC_SCALE * Math.sqrt(mcStrength / 92);
+      
       const color = b.id === selectedId ? SELECTED_COLOR : b.id === hoveredId ? HOVER_COLOR : HELPER_COLOR;
-      const mat = new THREE.MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: 0.45 });
-      const mesh = new THREE.Mesh(geom, mat);
-      mesh.position.set(b.x, b.y, b.z);
-      mesh.userData.ballId = b.id;
-      mesh.name = `helper-${b.id}`;
-      group.add(mesh);
+      
+      let mesh = group.children.find(c => c.userData.ballId === b.id) as THREE.Mesh;
+      if (!mesh) {
+        const geom = new THREE.SphereGeometry(visRadius, 16, 12);
+        const mat = new THREE.MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: 0.45 });
+        mesh = new THREE.Mesh(geom, mat);
+        mesh.userData.ballId = b.id;
+        mesh.userData.lastVisRadius = visRadius;
+        mesh.name = `helper-${b.id}`;
+        group.add(mesh);
+
+        if (b.id === selectedId && tControlRef.current) {
+          tControlRef.current.attach(mesh);
+        }
+      } else {
+        // Update geometry if radius significantly changed
+        if (Math.abs(mesh.userData.lastVisRadius - visRadius) > 0.01) {
+           mesh.geometry.dispose();
+           mesh.geometry = new THREE.SphereGeometry(visRadius, 16, 12);
+           mesh.userData.lastVisRadius = visRadius;
+        }
+        (mesh.material as THREE.MeshBasicMaterial).color.setHex(color);
+      }
+      
+      // Update mesh local position, BUT avoid tug-of-war if we are currently dragging THIS very mesh via TransformControls
+      if (!tControlRef.current?.dragging || tControlRef.current.object !== mesh) {
+        mesh.position.set(b.x, b.y, b.z);
+      }
     }
   }, [balls, selectedId, hoveredId]);
 
@@ -155,70 +247,17 @@ export function MetaballEditor3D({ pavilion3DRef, balls, onBallsChange }: Props)
     const canvas = engine.renderer.domElement;
 
     const onPointerDown = (e: PointerEvent) => {
-      if (e.button !== 0) return;
+      // Allow Gizmo interaction to take priority
+      if (e.button !== 0 || tControlRef.current?.dragging) return;
       const hitId = hitTestHelpers(e.clientX, e.clientY);
-      if (hitId) {
-        e.stopPropagation();
-        e.preventDefault();
-        setSelectedId(hitId);
-        selectedIdRef.current = hitId;
-        draggingRef.current = true;
-        engine.controls.enabled = false;
-
-        // Setup drag plane
-        const ball = ballsRef.current.find(b => b.id === hitId);
-        if (ball) {
-          const camDir = new THREE.Vector3();
-          engine.camera.getWorldDirection(camDir);
-          const ballPos = new THREE.Vector3(ball.x, ball.y, ball.z);
-          dragPlaneRef.current.setFromNormalAndCoplanarPoint(camDir, ballPos);
-
-          // Compute offset
-          const rect = canvas.getBoundingClientRect();
-          mouse.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-          mouse.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-          raycaster.current.setFromCamera(mouse.current, engine.camera);
-          const intersection = new THREE.Vector3();
-          raycaster.current.ray.intersectPlane(dragPlaneRef.current, intersection);
-          dragOffsetRef.current.copy(ballPos).sub(intersection);
-        }
-      } else {
-        setSelectedId(null);
-        selectedIdRef.current = null;
-      }
+      setSelectedId(hitId);
+      selectedIdRef.current = hitId;
     };
 
     const onPointerMove = (e: PointerEvent) => {
-      if (draggingRef.current && selectedIdRef.current) {
-        e.stopPropagation();
-        e.preventDefault();
-        const rect = canvas.getBoundingClientRect();
-        mouse.current.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        mouse.current.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-        raycaster.current.setFromCamera(mouse.current, engine.camera);
-        const pt = new THREE.Vector3();
-        raycaster.current.ray.intersectPlane(dragPlaneRef.current, pt);
-        if (pt) {
-          pt.add(dragOffsetRef.current);
-          const newBalls = ballsRef.current.map(b =>
-            b.id === selectedIdRef.current
-              ? { ...b, x: pt.x, y: pt.y, z: pt.z }
-              : b
-          );
-          onBallsChange(newBalls);
-        }
-      } else {
-        // Hover
-        const hitId = hitTestHelpers(e.clientX, e.clientY);
-        setHoveredId(hitId);
-      }
-    };
-
-    const onPointerUp = () => {
-      if (draggingRef.current) {
-        draggingRef.current = false;
-        engine.controls.enabled = true;
-      }
+      if (tControlRef.current?.dragging) return;
+      const hitId = hitTestHelpers(e.clientX, e.clientY);
+      setHoveredId(hitId);
     };
 
     const onWheel = (e: WheelEvent) => {
@@ -239,19 +278,29 @@ export function MetaballEditor3D({ pavilion3DRef, balls, onBallsChange }: Props)
       onBallsChange(newBalls);
     };
 
-    canvas.addEventListener('pointerdown', onPointerDown, true);
-    canvas.addEventListener('pointermove', onPointerMove, true);
-    canvas.addEventListener('pointerup', onPointerUp, true);
+    canvas.addEventListener('pointerdown', onPointerDown, false);
+    canvas.addEventListener('pointermove', onPointerMove, false);
     canvas.addEventListener('wheel', onWheel, { passive: false, capture: true });
 
     return () => {
-      canvas.removeEventListener('pointerdown', onPointerDown, true);
-      canvas.removeEventListener('pointermove', onPointerMove, true);
-      canvas.removeEventListener('pointerup', onPointerUp, true);
+      canvas.removeEventListener('pointerdown', onPointerDown, false);
+      canvas.removeEventListener('pointermove', onPointerMove, false);
       canvas.removeEventListener('wheel', onWheel, true);
-      engine.controls.enabled = true;
     };
   }, [pavilion3DRef, hitTestHelpers, onBallsChange]);
+
+  useEffect(() => {
+    if (tControlRef.current) {
+      if (selectedId) {
+        const helper = helpersGroupRef.current.children.find(c => c.userData.ballId === selectedId);
+        if (helper && tControlRef.current.object !== helper) {
+          tControlRef.current.attach(helper);
+        }
+      } else {
+        tControlRef.current.detach();
+      }
+    }
+  }, [selectedId]);
 
   /* ── UI Panel ── */
   const selectedBall = balls.find(b => b.id === selectedId);

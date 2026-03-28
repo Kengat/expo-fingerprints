@@ -18,6 +18,7 @@ interface Pavilion3DProps {
     editing3D?: boolean;
     fabricEnabled?: boolean;
     fabricItems?: any[];
+    metaballs?: any[];
 }
 
 export interface Pavilion3DHandle {
@@ -30,7 +31,7 @@ export interface Pavilion3DHandle {
     } | null;
 }
 
-export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, dotCircles = [], onBaseGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [] }, ref) {
+export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, dotCircles = [], onBaseGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [], metaballs = [] }, ref) {
     const mountRef = useRef<HTMLDivElement>(null);
     const onBaseGeomRef = useRef(onBaseGeometryUpdate);
     onBaseGeomRef.current = onBaseGeometryUpdate;
@@ -263,13 +264,17 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                 engineRef.current.params.fabricItems = fabricItems;
                 if (fabricEnabled) needsUpdate = true;
             }
-            
+            if (engineRef.current.params.metaballs !== metaballs) {
+                engineRef.current.params.metaballs = metaballs;
+                if (fabricEnabled) needsUpdate = true;
+            }
+
             if (needsUpdate) {
                 const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
                 onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
             }
         }
-    }, [fabricEnabled, fabricItems]);
+    }, [fabricEnabled, fabricItems, metaballs]);
 
     return (
         <div

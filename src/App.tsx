@@ -5,7 +5,7 @@
 
 import React, { useState, useRef } from 'react';
 import * as THREE from 'three';
-import { Fingerprint, MonitorPlay, X, Box, Save, FolderOpen, Waves, Circle } from 'lucide-react';
+import { Fingerprint, MonitorPlay, X, Box, Save, FolderOpen, Waves, Circle, Download } from 'lucide-react';
 import { Pavilion3D } from './components/Pavilion3D';
 import type { Pavilion3DHandle } from './components/Pavilion3D';
 import { WhorlCanvas } from './components/WhorlCanvas';
@@ -80,6 +80,7 @@ export default function App() {
   const [fabricEnabled, setFabricEnabled] = useState(false);
   const [isEditingMetaballs, setIsEditingMetaballs] = useState(false);
   const [metaballs, setMetaballs] = useState<MetaballData[]>([]);
+  const [metaballsFinal, setMetaballsFinal] = useState<MetaballData[]>([]);
   const [fabricItems, setFabricItems] = useState<FabricItem[]>([]);
   const [fingerprintCanvas, setFingerprintCanvas] = useState<HTMLCanvasElement | null>(null);
   const [bakeHolesTrigger, setBakeHolesTrigger] = useState<number>(0);
@@ -98,6 +99,12 @@ export default function App() {
   React.useEffect(() => {
     localStorage.setItem(STORAGE_KEY_CURRENT, JSON.stringify({ items, globalSettings }));
   }, [items, globalSettings]);
+
+  // Debounce the metaballs physics/geometry update to avoid lag while dragging
+  React.useEffect(() => {
+    const t = setTimeout(() => setMetaballsFinal(metaballs), 200);
+    return () => clearTimeout(t);
+  }, [metaballs]);
 
   // Live preview for 3D editing
   React.useEffect(() => {
@@ -250,6 +257,13 @@ export default function App() {
     input.click();
   };
 
+  const handleExportFabric = async () => {
+    const engine = pavilion3DRef.current?.getEngine();
+    if (!engine) return;
+    const { exportFabricSTL } = await import('./pavilion_3d/utils/export.js');
+    exportFabricSTL(engine.scene, engine.params);
+  };
+
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#1a1a1a] text-white font-sans">
 
@@ -264,6 +278,7 @@ export default function App() {
           editing3D={isEditing3D}
           fabricEnabled={fabricEnabled}
           fabricItems={fabricItems}
+          metaballs={metaballsFinal}
         />
       </div>
 
@@ -379,6 +394,19 @@ export default function App() {
                 Removes dots near geometry edges
             </div>
           </div>
+          <button
+            onClick={handleExportFabric}
+            disabled={!fabricEnabled}
+            className={`flex items-center justify-center gap-2 mt-1 px-4 py-2.5 rounded-xl shadow-lg transition-all font-medium border text-sm w-full ${
+              fabricEnabled 
+                ? 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-400/30' 
+                : 'bg-indigo-600/30 text-white/40 border-indigo-400/10 cursor-not-allowed'
+            }`}
+            title="Export the final generated fabric geometry to STL"
+          >
+            <Download className="w-4 h-4" />
+            Export Fabric (STL)
+          </button>
         </div>
 
         {isEditing3D && (
