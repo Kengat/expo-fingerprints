@@ -753,7 +753,7 @@ export interface FingerprintParams {
 
 interface Props {
   params: FingerprintParams;
-  onPointChange: (name: string, value: any) => void;
+  onPointChange: (name: keyof FingerprintParams, value: any) => void;
   width?: number;
   height?: number;
   variant?: 'realistic' | 'vector' | 'dots';
@@ -914,7 +914,7 @@ export function FingerprintGenerator({ params, onPointChange, width = 512, heigh
         newPoly[idx] = { x: x * (512 / width), y: y * (512 / height) };
         onPointChange('customPolygon', newPoly);
     } else {
-        onPointChange(dragging, toWebgl(x, y));
+        onPointChange(dragging as keyof FingerprintParams, toWebgl(x, y));
     }
   };
 

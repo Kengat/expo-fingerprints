@@ -327,12 +327,12 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
         return () => panels.forEach(p => p.removeEventListener('wheel', stopProp));
     }, [savedPatterns, items]);
 
-    const handleParamChange = (name: keyof FingerprintParams, value: number | boolean) => {
+    const handleParamChange = <K extends keyof FingerprintParams>(name: K, value: FingerprintParams[K]) => {
         if (!selectedId) return;
         setItems(items.map(it => it.id === selectedId ? { ...it, params: { ...it.params, [name]: value } } : it));
     };
 
-    const handlePointChange = (id: string, name: string, value: any) => {
+    const handlePointChange = <K extends keyof FingerprintParams>(id: string, name: K, value: FingerprintParams[K]) => {
         setItems(items.map(it => it.id === id ? { ...it, params: { ...it.params, [name]: value } } : it));
     };
 

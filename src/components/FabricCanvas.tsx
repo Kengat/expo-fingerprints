@@ -20,6 +20,13 @@ export interface FabricItem {
     noiseOffset?: number;
 }
 
+export interface Attractor {
+    id: string;
+    x: number;
+    z: number;
+    type: 'core' | 'delta';
+}
+
 interface FabricCanvasProps {
     externalItems?: FabricItem[];
     onItemsChange?: (items: FabricItem[]) => void;
@@ -132,7 +139,14 @@ const getBezierPoint = (t: number, p0: number, p1: number, p2: number, p3: numbe
     return uuu * p0 + 3 * uu * t * p1 + 3 * u * tt * p2 + ttt * p3;
 };
 
-const defaultFlowConfig = { density: 0.15, noiseFreq: 0.04, angleAmp: 0.6, seed: 123 };
+const defaultFlowConfig = { 
+    density: 0.15, 
+    noiseFreq: 0.04, 
+    angleAmp: 0.6, 
+    seed: 123,
+    rotation: 0,
+    attractors: [] as Attractor[]
+};
 
 const generateFlowPolylines = (config: typeof defaultFlowConfig, bounds: number) => {
     const newItems: FabricItem[] = [];
@@ -152,7 +166,22 @@ const generateFlowPolylines = (config: typeof defaultFlowConfig, bounds: number)
         const nx = (x / bounds) * 30;
         const nz = (z / bounds) * 30;
         const n = noise2D(nx * config.noiseFreq + config.seed, nz * config.noiseFreq + config.seed);
-        return n * Math.PI * config.angleAmp;
+        let theta = n * Math.PI * config.angleAmp;
+        
+        theta += (config.rotation || 0) * Math.PI / 180;
+        
+        if (config.attractors && config.attractors.length > 0) {
+            for (const a of config.attractors) {
+                const angleToAttractor = Math.atan2(z - a.z, x - a.x);
+                if (a.type === 'core') {
+                    theta += 0.5 * angleToAttractor;
+                } else if (a.type === 'delta') {
+                    theta -= 0.5 * angleToAttractor;
+                }
+            }
+        }
+        
+        return theta;
     };
     
     const toGrid = (x: number, z: number) => {
@@ -278,8 +307,10 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
     }, [items]);
 
     const [selectedId, setSelectedId] = useState<string | null>(null);
+    const [selectedAttractorId, setSelectedAttractorId] = useState<string | null>(null);
     const [hoveredId, setHoveredId] = useState<string | null>(null);
     const [hoveredPoint, setHoveredPoint] = useState<string | null>(null);
+    const [hoveredAttractorId, setHoveredAttractorId] = useState<string | null>(null);
     const [view, setView] = useState(() => {
         const initialBounds = radius * 1.5; // fallback
         // Try to fit the bounds into the screen (assume ~800px height)
@@ -355,6 +386,13 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
                     }
                     return it;
                 }));
+            } else if (dragAction.type === 'moveAttractor') {
+                const newConf = { 
+                    ...flowConfig, 
+                    attractors: flowConfig.attractors.map(a => a.id === dragAction.id ? { ...a, x, z } : a) 
+                };
+                setFlowConfig(newConf);
+                regenerateFlow(newConf);
             }
             return;
         }
@@ -364,8 +402,19 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
         if (target.closest('.control-panel')) {
             setHoveredId(null);
             setHoveredPoint(null);
+            setHoveredAttractorId(null);
             return;
         }
+
+        // Check attractors first
+        const hoverAttr = flowConfig.attractors?.find(a => Math.hypot(a.x - x, a.z - z) < 15 / view.zoom);
+        if (hoverAttr) {
+            setHoveredAttractorId(hoverAttr.id);
+            setHoveredPoint(null);
+            setHoveredId(null);
+            return;
+        }
+        setHoveredAttractorId(null);
 
         // Check points first if selected
         if (selectedItem) {
@@ -390,6 +439,7 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
     const handlePointerLeave = () => {
         setHoveredId(null);
         setHoveredPoint(null);
+        setHoveredAttractorId(null);
         setDragAction(null);
     };
 
@@ -539,8 +589,32 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
             }
         });
 
+        // Draw attractors
+        if (flowConfig.attractors) {
+            flowConfig.attractors.forEach(attr => {
+                const isSel = attr.id === selectedAttractorId;
+                const isHov = attr.id === hoveredAttractorId;
+                
+                ctx.beginPath();
+                ctx.arc(attr.x, attr.z, (isHov || isSel ? 6 : 4) / view.zoom, 0, Math.PI * 2);
+                ctx.fillStyle = attr.type === 'core' ? '#ef4444' : '#3b82f6';
+                ctx.fill();
+                
+                if (isSel) {
+                    ctx.lineWidth = 2 / view.zoom;
+                    ctx.strokeStyle = '#fff';
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.arc(attr.x, attr.z, 10 / view.zoom, 0, Math.PI * 2);
+                    ctx.lineWidth = 2 / view.zoom;
+                    ctx.strokeStyle = attr.type === 'core' ? '#ef4444' : '#3b82f6';
+                    ctx.stroke();
+                }
+            });
+        }
+
         ctx.restore();
-    }, [items, view, selectedId, hoveredId, hoveredPoint, dimensions]);
+    }, [items, view, selectedId, hoveredId, hoveredPoint, selectedAttractorId, hoveredAttractorId, flowConfig.attractors, dimensions]);
 
     const getControlPointAtPos = (x: number, z: number, item: FabricItem) => {
         if (item.type !== 'bezier') return null;
@@ -603,6 +677,14 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
         const mouseY = e.clientY - rect.top;
         const x = (mouseX - view.x) / view.zoom;
         const z = (mouseY - view.y) / view.zoom;
+
+        const clickedAttr = flowConfig.attractors?.find(a => Math.hypot(a.x - x, a.z - z) < 15 / view.zoom);
+        if (clickedAttr) {
+            setSelectedAttractorId(clickedAttr.id);
+            setSelectedId(null);
+            setDragAction({ type: 'moveAttractor', id: clickedAttr.id });
+            return;
+        }
 
         if (selectedItem) {
             const pt = getControlPointAtPos(x, z, selectedItem);
@@ -667,6 +749,7 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
             }
         } else {
             setSelectedId(null);
+            setSelectedAttractorId(null);
             setDragAction({ 
                 type: 'pan', 
                 startX: e.clientX, 
@@ -700,9 +783,18 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
     };
 
     const deleteSelected = () => {
-        if (!selectedId) return;
-        setItems(items.filter(it => it.id !== selectedId));
-        setSelectedId(null);
+        if (selectedId) {
+            setItems(items.filter(it => it.id !== selectedId));
+            setSelectedId(null);
+        } else if (selectedAttractorId) {
+            const newConf = {
+                ...flowConfig,
+                attractors: flowConfig.attractors.filter(a => a.id !== selectedAttractorId)
+            };
+            setFlowConfig(newConf);
+            regenerateFlow(newConf);
+            setSelectedAttractorId(null);
+        }
     };
 
     const regenerateFlow = (config: typeof flowConfig) => {
@@ -716,6 +808,22 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
         const newConf = { ...flowConfig, seed: Math.random() * 100 };
         setFlowConfig(newConf);
         regenerateFlow(newConf);
+        setSelectedId(null);
+        setSelectedAttractorId(null);
+    };
+
+    const addAttractor = (type: 'core' | 'delta') => {
+        const id = Math.random().toString(36).substr(2, 9);
+        const x = (-view.x + dimensions.width / 2) / view.zoom;
+        const z = (-view.y + dimensions.height / 2) / view.zoom;
+        
+        const newConf = {
+            ...flowConfig,
+            attractors: [...(flowConfig.attractors || []), { id, x, z, type }]
+        };
+        setFlowConfig(newConf);
+        regenerateFlow(newConf);
+        setSelectedAttractorId(id);
         setSelectedId(null);
     };
 
@@ -758,7 +866,7 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
             <div className="control-panel absolute top-2 left-1/2 -translate-x-1/2 bg-[#1C1D21]/95 backdrop-blur-md border border-white/10 shadow-2xl rounded-2xl p-2.5 flex gap-2 items-start z-50 min-w-[300px] pointer-events-auto">
                 <div className="flex flex-col gap-1.5 w-full">
                     <div className="flex gap-2">
-                        <button onClick={deleteSelected} disabled={!selectedId} className="flex-1 flex justify-center items-center gap-1 bg-red-600/20 hover:bg-red-600/40 text-red-500 disabled:opacity-50 disabled:cursor-not-allowed px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-wide font-bold transition-colors whitespace-nowrap">
+                        <button onClick={deleteSelected} disabled={!selectedId && !selectedAttractorId} className="flex-1 flex justify-center items-center gap-1 bg-red-600/20 hover:bg-red-600/40 text-red-500 disabled:opacity-50 disabled:cursor-not-allowed px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-wide font-bold transition-colors whitespace-nowrap">
                             <Trash2 className="w-3 h-3" /> Delete
                         </button>
                         <button onClick={addNew} className="flex-1 flex justify-center items-center gap-1 bg-blue-600/20 hover:bg-blue-600/40 text-blue-500 px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-wide font-bold transition-colors whitespace-nowrap">
@@ -766,6 +874,15 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
                         </button>
                         <button onClick={handleGenerateFlow} className="flex-1 flex justify-center items-center gap-1 bg-purple-600/20 hover:bg-purple-600/40 text-purple-500 px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-wide font-bold transition-colors whitespace-nowrap">
                             <Waves className="w-3 h-3" /> Generate Flow
+                        </button>
+                        
+                        <div className="w-px h-6 bg-white/10 mx-1 self-center" />
+                        
+                        <button onClick={() => addAttractor('core')} className="flex-1 flex justify-center items-center gap-1 bg-red-600/20 hover:bg-red-600/40 text-red-500 px-2 py-1.5 rounded-lg text-[10px] uppercase tracking-wide font-bold transition-colors whitespace-nowrap" title="Add Core Attractor">
+                            + Core
+                        </button>
+                        <button onClick={() => addAttractor('delta')} className="flex-1 flex justify-center items-center gap-1 bg-blue-600/20 hover:bg-blue-600/40 text-blue-500 px-2 py-1.5 rounded-lg text-[10px] uppercase tracking-wide font-bold transition-colors whitespace-nowrap" title="Add Delta Attractor">
+                            + Delta
                         </button>
                     </div>
 
@@ -811,6 +928,17 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
                                     </div>
                                     <input type="range" min="0.0" max="1.5" step="0.05" value={flowConfig.angleAmp} onChange={e => {
                                         const newConf = { ...flowConfig, angleAmp: parseFloat(e.target.value) };
+                                        setFlowConfig(newConf);
+                                        regenerateFlow(newConf);
+                                    }} className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500" />
+                                </div>
+                                <div className="space-y-0.5 pt-2">
+                                    <div className="flex justify-between text-[9px]">
+                                        <span className="text-gray-400 font-medium">Rotation</span>
+                                        <span className="font-mono text-gray-500">{(flowConfig.rotation || 0).toFixed(0)}°</span>
+                                    </div>
+                                    <input type="range" min="-180" max="180" step="1" value={flowConfig.rotation || 0} onChange={e => {
+                                        const newConf = { ...flowConfig, rotation: parseFloat(e.target.value) };
                                         setFlowConfig(newConf);
                                         regenerateFlow(newConf);
                                     }} className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500" />
