@@ -11,6 +11,9 @@ export type CanvasItem = {
     params: FingerprintParams;
 };
 
+export type StreamlinePoint = { x: number; y: number; thickness: number };
+export type Streamline = StreamlinePoint[];
+
 interface MergedFingerprintsCanvasProps {
     items: CanvasItem[];
     view: { x: number; y: number; zoom: number };
@@ -645,6 +648,162 @@ export function collectDotCircles(
     }
 
     return circles;
+}
+
+export function collectStreamlines(
+    items: CanvasItem[],
+    view: { x: number; y: number; zoom: number },
+    cullingOffset: number,
+    edgeCullRadius: number = 0,
+    edgeDistField: EdgeDistanceField = null,
+    globalSettings: any = null,
+): Streamline[] {
+    const streamlines: Streamline[] = [];
+
+    const isCulledByAny = (gx: number, gy: number, customOffset: number = cullingOffset, startLayer: number = 0) => {
+        for (let aboveIndex = startLayer; aboveIndex < items.length; aboveIndex++) {
+            if (isInsideFingerprint(gx, gy, items[aboveIndex], customOffset)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (globalSettings?.enableVerticalBackground) {
+        const gs = globalSettings.globalScale || 1.0;
+        const bgRotation = globalSettings.bgRotation ?? 0;
+        const bgLineDensity = (globalSettings.bgLineDensity ?? 31.0) / gs;
+        const bgLineThickness = (globalSettings.bgLineThickness ?? 3) * gs;
+
+        const cx = UV_SIZE / 2;
+        const cy = UV_SIZE / 2;
+        const radius = UV_SIZE * 0.8;
+        const lineSpacing = 512 / bgLineDensity;
+
+        const cos = Math.cos(bgRotation * Math.PI / 180);
+        const sin = Math.sin(bgRotation * Math.PI / 180);
+
+        const transformBgPoint = (lx: number, ly: number) => {
+            const nx = lx * cos - ly * sin;
+            const ny = lx * sin + ly * cos;
+            return { x: cx + nx, y: cy + ny };
+        };
+
+        const bgLines: {x: number, y: number}[][] = [];
+        for (let x = -radius; x <= radius; x += lineSpacing) {
+            const line: {x: number, y: number}[] = [];
+            for (let y = -radius; y <= radius; y += 10) {
+                line.push({x, y});
+            }
+            bgLines.push(line);
+        }
+
+        for (const line of bgLines) {
+            let currentSegment: Streamline = [];
+            for (let i = 0; i < line.length; i++) {
+                const globalP = transformBgPoint(line[i].x, line[i].y);
+                
+                if (globalP.x >= 0 && globalP.x <= UV_SIZE && globalP.y >= 0 && globalP.y <= UV_SIZE) {
+                    const baseThickness = bgLineThickness;
+                    const halfLw = baseThickness / 2;
+                    const culled = isCulledByAny(globalP.x, globalP.y, cullingOffset, 0) || 
+                                   isNearGeometryEdge(edgeDistField, globalP.x, globalP.y, halfLw, edgeCullRadius);
+                    
+                    if (!culled) {
+                        currentSegment.push({
+                            x: globalP.x * view.zoom + view.x,
+                            y: globalP.y * view.zoom + view.y,
+                            thickness: baseThickness * view.zoom
+                        });
+                    } else {
+                        if (currentSegment.length > 1) {
+                            streamlines.push(currentSegment);
+                        }
+                        currentSegment = [];
+                    }
+                } else {
+                    if (currentSegment.length > 1) {
+                        streamlines.push(currentSegment);
+                    }
+                    currentSegment = [];
+                }
+            }
+            if (currentSegment.length > 1) {
+                streamlines.push(currentSegment);
+            }
+        }
+    }
+
+    for (let layerIndex = 0; layerIndex < items.length; layerIndex++) {
+        const item = items[layerIndex];
+        const lines = generateStreamlines(item.params, 512, 512, item.scale);
+        const noiseScale = item.params.noiseScale ?? 10;
+        const lineThicknessMin = item.params.lineThicknessMin ?? 3;
+        const lineThicknessMax = item.params.lineThicknessMax ?? 3;
+
+        function getLineThickness(lx: number, ly: number) {
+            const scaledMin = lineThicknessMin / item.scale;
+            const scaledMax = lineThicknessMax / item.scale;
+            if (scaledMin === scaledMax) return scaledMin;
+            const nx = (lx / 512) * 2 - 1;
+            const ny = -((ly / 512) * 2 - 1);
+            let v = 0;
+            v += Math.sin(nx * noiseScale + item.params.seed + 10) * Math.cos(ny * noiseScale + item.params.seed + 10);
+            v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed + 10) * Math.cos(ny * (noiseScale * 2) + item.params.seed + 10);
+            v = (v + 1.5) / 3;
+            return scaledMin + v * (scaledMax - scaledMin);
+        }
+
+        const transformPoint = (lx: number, ly: number) => {
+            let cx = lx - 256;
+            let cy = ly - 256;
+            const cos = Math.cos(item.rotation * Math.PI / 180);
+            const sin = Math.sin(item.rotation * Math.PI / 180);
+            let nx = cx * cos - cy * sin;
+            let ny = cx * sin + cy * cos;
+            nx = nx * item.scale + item.x;
+            ny = ny * item.scale + item.y;
+            return { x: nx, y: ny };
+        };
+
+        const isCulled = (gx: number, gy: number, customOffset: number = cullingOffset) => {
+            for (let aboveIndex = layerIndex + 1; aboveIndex < items.length; aboveIndex++) {
+                if (isInsideFingerprint(gx, gy, items[aboveIndex], customOffset)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        for (const line of lines) {
+            let currentSegment: Streamline = [];
+            for (let i = 0; i < line.length; i++) {
+                const globalP = transformPoint(line[i].x, line[i].y);
+                const lw = getLineThickness(line[i].x, line[i].y) * item.scale;
+                const halfLw = lw / 2;
+                
+                const culled = isCulled(globalP.x, globalP.y) || isNearGeometryEdge(edgeDistField, globalP.x, globalP.y, halfLw, edgeCullRadius);
+                
+                if (!culled) {
+                    currentSegment.push({
+                        x: globalP.x * view.zoom + view.x,
+                        y: globalP.y * view.zoom + view.y,
+                        thickness: lw * view.zoom
+                    });
+                } else {
+                    if (currentSegment.length > 1) {
+                        streamlines.push(currentSegment);
+                    }
+                    currentSegment = [];
+                }
+            }
+            if (currentSegment.length > 1) {
+                streamlines.push(currentSegment);
+            }
+        }
+    }
+
+    return streamlines;
 }
 
 export function getComputedItems(items: CanvasItem[], globalSettings: any): CanvasItem[] {

@@ -81,6 +81,7 @@ export function setupGUI(params, callbacks) {
   fp.add(params, 'fpRidgeSpacing', 6, 30, 1).name('Ridge Spacing').onChange(onParamChange);
   fp.add(params, 'fpDotSize', 1, 8, 0.5).name('Dot Size').onChange(onParamChange);
   fp.add(params, 'fpDotGap', 3, 20, 1).name('Dot Gap').onChange(onParamChange);
+  fp.add(params, 'fpLineExtrusion', 0.1, 10.0, 0.1).name('Line Extrusion').onChange(onParamChange);
   fp.add(params, 'fpBackgroundOpacity', 0, 1, 0.05).name('BG Opacity').onChange(onParamChange);
   fp.add(params, 'fpSeed', 0, 1000, 1).name('Seed').onChange(onParamChange);
   fp.add(params, 'fpShowPreview').name('Show Preview').onChange(onParamChange);

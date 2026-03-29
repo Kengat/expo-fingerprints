@@ -230,6 +230,109 @@ function buildDrillGeometriesFromMesh(circles, canvasW, canvasH, geometry, thick
   return drillGeometries;
 }
 
+function createClosedTubeGeometry(curve, tubularSegments, radius, radialSegments) {
+  const tubeGeom = new THREE.TubeGeometry(curve, tubularSegments, radius, radialSegments, false);
+  const pos = tubeGeom.getAttribute('position');
+  const index = tubeGeom.getIndex();
+  const newPos = [];
+  const newIndex = [];
+  
+  for (let i = 0; i < pos.count; i++) {
+    newPos.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+  }
+  for (let i = 0; i < index.count; i++) {
+    newIndex.push(index.getX(i));
+  }
+  
+  // Start cap (Flat)
+  let startCenterX = 0, startCenterY = 0, startCenterZ = 0;
+  for (let i = 0; i < radialSegments; i++) {
+    startCenterX += pos.getX(i);
+    startCenterY += pos.getY(i);
+    startCenterZ += pos.getZ(i);
+  }
+  startCenterX /= radialSegments;
+  startCenterY /= radialSegments;
+  startCenterZ /= radialSegments;
+  
+  const startCenterIdx = newPos.length / 3;
+  newPos.push(startCenterX, startCenterY, startCenterZ);
+  for(let i = 0; i < radialSegments; i++) {
+     newIndex.push(startCenterIdx, i + 1, i);
+  }
+  
+  // End cap (Flat)
+  let endCenterX = 0, endCenterY = 0, endCenterZ = 0;
+  const endRingStart = tubularSegments * (radialSegments + 1);
+  for (let i = 0; i < radialSegments; i++) {
+    endCenterX += pos.getX(endRingStart + i);
+    endCenterY += pos.getY(endRingStart + i);
+    endCenterZ += pos.getZ(endRingStart + i);
+  }
+  endCenterX /= radialSegments;
+  endCenterY /= radialSegments;
+  endCenterZ /= radialSegments;
+  
+  const endCenterIdx = newPos.length / 3;
+  newPos.push(endCenterX, endCenterY, endCenterZ);
+  for (let i = 0; i < radialSegments; i++) {
+    newIndex.push(endCenterIdx, endRingStart + i, endRingStart + i + 1);
+  }
+  
+  const closedGeom = new THREE.BufferGeometry();
+  closedGeom.setAttribute('position', new THREE.Float32BufferAttribute(newPos, 3));
+  closedGeom.setIndex(new THREE.Uint32BufferAttribute(newIndex, 1));
+  closedGeom.computeVertexNormals();
+  return closedGeom;
+}
+
+function buildTubeGeometries(lines, canvasW, canvasH, shellFunc, extrusionParam) {
+  const tubeGeometries = [];
+  const sphereGeometries = [];
+  // Use extrusionParam maybe as a subtle multiplier, but thickness was 2x too large.
+  // We'll scale the base radius precisely.
+  
+  for (const line of lines) {
+    if (line.length < 2) continue;
+    const points = [];
+    let totalRadius = 0;
+    
+    for (const point of line) {
+      const u = point.x / canvasW;
+      const v = 1.0 - (point.y / canvasH);
+      if (u < 0.005 || u > 0.995 || v < 0.005 || v > 0.995) continue;
+      const { pt } = computeSurfacePointAndNormal(shellFunc, u, v);
+      points.push(pt);
+      const radiusUV = point.thickness / Math.max(canvasW, canvasH);
+      totalRadius += estimateWorldRadius(shellFunc, u, v, radiusUV);
+    }
+    
+    if (points.length < 2) continue;
+    
+    // totalRadius is accumulating radius based on thickness (which is diameter)
+    // We want the true radius:
+    const avgRadius = (totalRadius / points.length) * 0.5;
+    
+    const curve = new THREE.CatmullRomCurve3(points, false, 'chordal');
+    const segments = Math.max(8, Math.floor(points.length * 1.5));
+    const closedGeom = createClosedTubeGeometry(curve, segments, avgRadius, 8);
+    tubeGeometries.push(closedGeom);
+
+    // Create start and end spheres for rounded caps
+    const sphereGeomStart = new THREE.SphereGeometry(avgRadius, 8, 8);
+    sphereGeomStart.translate(points[0].x, points[0].y, points[0].z);
+    sphereGeomStart.deleteAttribute('uv');
+    sphereGeometries.push(sphereGeomStart);
+
+    const lastPt = points[points.length - 1];
+    const sphereGeomEnd = new THREE.SphereGeometry(avgRadius, 8, 8);
+    sphereGeomEnd.translate(lastPt.x, lastPt.y, lastPt.z);
+    sphereGeomEnd.deleteAttribute('uv');
+    sphereGeometries.push(sphereGeomEnd);
+  }
+  return { tubeGeometries, sphereGeometries };
+}
+
 /**
  * Compute barycentric coordinates of point (px, py) in UV triangle.
  * Returns { u, v, w } if inside, or null if outside.
@@ -253,6 +356,80 @@ function barycentricUV(px, py, tri) {
     return { u: bu, v: bv, w: bw };
   }
   return null;
+}
+
+function buildTubeGeometriesFromMesh(lines, canvasW, canvasH, geometry, extrusionParam) {
+  const pos = geometry.getAttribute('position');
+  const uv = geometry.getAttribute('uv');
+  if (!uv) return { tubeGeometries: [], sphereGeometries: [] };
+
+  const index = geometry.getIndex();
+  const triCount = index ? index.count / 3 : pos.count / 3;
+  const triData = [];
+  for (let t = 0; t < triCount; t++) {
+    const i0 = index ? index.getX(t * 3) : t * 3;
+    const i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1;
+    const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+    triData.push({
+      uv0x: uv.getX(i0), uv0y: uv.getY(i0),
+      uv1x: uv.getX(i1), uv1y: uv.getY(i1),
+      uv2x: uv.getX(i2), uv2y: uv.getY(i2),
+      i0, i1, i2
+    });
+  }
+
+  const tubeGeometries = [];
+  const sphereGeometries = [];
+  for (const line of lines) {
+    if (line.length < 2) continue;
+    const points = [];
+    let totalRadius = 0;
+    
+    for (const point of line) {
+      const cu = point.x / canvasW;
+      const cv = 1.0 - (point.y / canvasH);
+      if (cu < 0.005 || cu > 0.995 || cv < 0.005 || cv > 0.995) continue;
+
+      let foundPt = null;
+      for (const tri of triData) {
+        const bary = barycentricUV(cu, cv, tri);
+        if (bary) {
+          foundPt = new THREE.Vector3(
+            pos.getX(tri.i0) * bary.u + pos.getX(tri.i1) * bary.v + pos.getX(tri.i2) * bary.w,
+            pos.getY(tri.i0) * bary.u + pos.getY(tri.i1) * bary.v + pos.getY(tri.i2) * bary.w,
+            pos.getZ(tri.i0) * bary.u + pos.getZ(tri.i1) * bary.v + pos.getZ(tri.i2) * bary.w
+          );
+          break;
+        }
+      }
+      
+      if (foundPt) {
+        points.push(foundPt);
+        const radiusUV = point.thickness / Math.max(canvasW, canvasH);
+        totalRadius += Math.max(MIN_WORLD_RADIUS, Math.min(MAX_WORLD_RADIUS, radiusUV * 15));
+      }
+    }
+    
+    if (points.length < 2) continue;
+    
+    const avgRadius = (totalRadius / points.length) * 0.5;
+    const curve = new THREE.CatmullRomCurve3(points, false, 'chordal');
+    const segments = Math.max(8, Math.floor(points.length * 1.5));
+    const closedGeom = createClosedTubeGeometry(curve, segments, avgRadius, 8);
+    tubeGeometries.push(closedGeom);
+
+    const sphereGeomStart = new THREE.SphereGeometry(avgRadius, 8, 8);
+    sphereGeomStart.translate(points[0].x, points[0].y, points[0].z);
+    sphereGeomStart.deleteAttribute('uv');
+    sphereGeometries.push(sphereGeomStart);
+
+    const lastPt = points[points.length - 1];
+    const sphereGeomEnd = new THREE.SphereGeometry(avgRadius, 8, 8);
+    sphereGeomEnd.translate(lastPt.x, lastPt.y, lastPt.z);
+    sphereGeomEnd.deleteAttribute('uv');
+    sphereGeometries.push(sphereGeomEnd);
+  }
+  return { tubeGeometries, sphereGeometries };
 }
 
 function extractOuterShell(finalGeom) {
@@ -315,6 +492,11 @@ function buildSinglePavilion(p) {
     p.skinType === 'fingerprint' &&
     Array.isArray(p._fingerprintCircles) &&
     p._fingerprintCircles.length > 0;
+
+  const hasVectorLines = (p.bakeTubes || p.previewTubes) &&
+    p.skinType === 'fingerprint' &&
+    Array.isArray(p._fingerprintLines) &&
+    p._fingerprintLines.length > 0;
 
   const thickness = hasVectorCircles ? 5.0 : 0;
 
@@ -390,28 +572,72 @@ function buildSinglePavilion(p) {
 
   let bakePromise = Promise.resolve();
 
-  if (hasVectorCircles) {
+  if (hasVectorCircles || hasVectorLines) {
     const t0 = performance.now();
 
     const canvasW = p._fingerprintCanvasWidth || 1920;
     const canvasH = p._fingerprintCanvasHeight || 1080;
 
-    const circles = deduplicateCircles(p._fingerprintCircles);
-    console.log(`[Bake] ${circles.length} circles (${p._fingerprintCircles.length} raw)`);
+    let drillGeometries = [];
+    if (hasVectorCircles) {
+      const circles = deduplicateCircles(p._fingerprintCircles);
+      console.log(`[Bake] ${circles.length} circles (${p._fingerprintCircles.length} raw)`);
 
-    const t1 = performance.now();
-    let drillGeometries;
-    if (p.importMode && p._importedGeometry) {
-      // For imported models: use UV mapping from the original (unthickened) geometry
-      drillGeometries = buildDrillGeometriesFromMesh(circles, canvasW, canvasH, p._importedGeometry, thickness);
-    } else {
-      const shellFunc = getShellFunction(p);
-      drillGeometries = buildDrillGeometries(circles, canvasW, canvasH, shellFunc, thickness);
+      const t1 = performance.now();
+      if (p.importMode && p._importedGeometry) {
+        drillGeometries = buildDrillGeometriesFromMesh(circles, canvasW, canvasH, p._importedGeometry, thickness);
+      } else {
+        const shellFunc = getShellFunction(p);
+        drillGeometries = buildDrillGeometries(circles, canvasW, canvasH, shellFunc, thickness);
+      }
+      const t2 = performance.now();
+      console.log(`[Bake] Built ${drillGeometries.length} drill cylinders in ${(t2 - t1).toFixed(0)}ms`);
     }
-    const t2 = performance.now();
-    console.log(`[Bake] Built ${drillGeometries.length} drill cylinders in ${(t2 - t1).toFixed(0)}ms`);
 
-    if (drillGeometries.length > 0) {
+    let tubeGeometries = [];
+    let sphereGeometries = [];
+    if (hasVectorLines) {
+      const lines = p._fingerprintLines;
+      console.log(`[Bake] ${lines.length} streamlines`);
+
+      const t1 = performance.now();
+      if (p.importMode && p._importedGeometry) {
+        const res = buildTubeGeometriesFromMesh(lines, canvasW, canvasH, p._importedGeometry, p.fpLineExtrusion);
+        tubeGeometries = res.tubeGeometries;
+        sphereGeometries = res.sphereGeometries;
+      } else {
+        const shellFunc = getShellFunction(p);
+        const res = buildTubeGeometries(lines, canvasW, canvasH, shellFunc, p.fpLineExtrusion);
+        tubeGeometries = res.tubeGeometries;
+        sphereGeometries = res.sphereGeometries;
+      }
+      const t2 = performance.now();
+      console.log(`[Bake] Built ${tubeGeometries.length} tubes in ${(t2 - t1).toFixed(0)}ms`);
+    }
+
+    if (p.previewTubes && tubeGeometries.length > 0) {
+      const allTubesForPreview = [...tubeGeometries, ...sphereGeometries];
+      tubeGeometries = []; // Clear tube geometries so we bypass CSG union for previews
+      sphereGeometries = [];
+      
+      import('three/addons/utils/BufferGeometryUtils.js').then(({ mergeGeometries }) => {
+        const mergedTubes = mergeGeometries(allTubesForPreview, false);
+        const materialColor = new THREE.Color(p.materialColor).multiplyScalar(0.75); // Darken match
+        const tubeMat = new THREE.MeshStandardMaterial({
+          color: materialColor, 
+          roughness: p.roughness || 0.6,
+          metalness: p.metalness || 0.1,
+          side: THREE.DoubleSide
+        });
+        const tubeMesh = new THREE.Mesh(mergedTubes, tubeMat);
+        tubeMesh.name = 'preview-tubes';
+        pavilionGroup.add(tubeMesh);
+      }).catch(err => {
+        console.error('[Preview] Failed to generate mesh:', err);
+      });
+    }
+
+    if (drillGeometries.length > 0 || tubeGeometries.length > 0) {
       bakePromise = Promise.all([
         import('three/addons/utils/BufferGeometryUtils.js'),
         import('manifold-3d')
@@ -468,21 +694,37 @@ function buildSinglePavilion(p) {
           return new m.Manifold(mesh);
         }
 
-        const baseManifold = geometryToManifold(shellGeom, false);
-        console.log('[Bake] Base Manifold Status:', baseManifold.status(), 'Volume:', baseManifold.volume());
+        let resultManifold = geometryToManifold(shellGeom, false);
+        console.log('[Bake] Base Manifold Status:', resultManifold.status(), 'Volume:', resultManifold.volume());
 
-        const mergedDrills = mergeGeomsUtil(drillGeometries, false);
-        const drillManifold = geometryToManifold(mergedDrills, true);
-        console.log('[Bake] Drill Manifold Status:', drillManifold.status(), 'Volume:', drillManifold.volume());
+        if (drillGeometries.length > 0) {
+          const mergedDrills = mergeGeomsUtil(drillGeometries, false);
+          const drillManifold = geometryToManifold(mergedDrills, true);
+          console.log('[Bake] Drill Manifold Status:', drillManifold.status(), 'Volume:', drillManifold.volume());
+          resultManifold = m.Manifold.difference(resultManifold, drillManifold);
+          mergedDrills.dispose();
+        }
+
+        if (tubeGeometries.length > 0) {
+          const mergedTubes = mergeGeomsUtil(tubeGeometries, false);
+          const tubeManifold = geometryToManifold(mergedTubes, false);
+          console.log('[Bake] Tube Manifold Status:', tubeManifold.status(), 'Volume:', tubeManifold.volume());
+          resultManifold = m.Manifold.union(resultManifold, tubeManifold);
+          mergedTubes.dispose();
+
+          if (sphereGeometries.length > 0) {
+            const mergedSpheres = mergeGeomsUtil(sphereGeometries, false);
+            const sphereManifold = geometryToManifold(mergedSpheres, false);
+            console.log('[Bake] Sphere Manifold Status:', sphereManifold.status());
+            resultManifold = m.Manifold.union(resultManifold, sphereManifold);
+            mergedSpheres.dispose();
+          }
+        }
+
+        console.log('[Bake] Final Result Manifold Status:', resultManifold.status(), 'Volume:', resultManifold.volume());
 
         const t4 = performance.now();
-        console.log(`[Bake] Built Manifolds in ${(t4 - t3).toFixed(0)}ms`);
-
-        const resultManifold = m.Manifold.difference(baseManifold, drillManifold);
-        console.log('[Bake] Result Manifold Status:', resultManifold.status(), 'Volume:', resultManifold.volume());
-
-        const t5 = performance.now();
-        console.log(`[Bake] CSG subtraction in ${(t5 - t4).toFixed(0)}ms`);
+        console.log(`[Bake] CSG in ${(t4 - t3).toFixed(0)}ms`);
 
         const outMesh = resultManifold.getMesh();
         const numVert = outMesh.numVert;
@@ -526,18 +768,18 @@ function buildSinglePavilion(p) {
         cleanGeom.setIndex(validIndices);
         cleanGeom.computeVertexNormals();
 
-        const t6 = performance.now();
-        console.log(`[Bake] Post-process & convert back in ${(t6 - t5).toFixed(0)}ms`);
-        console.log(`[Bake] Total: ${(t6 - t0).toFixed(0)}ms`);
+        const t5 = performance.now();
+        console.log(`[Bake] Post-process & convert back in ${(t5 - t4).toFixed(0)}ms`);
+        console.log(`[Bake] Total: ${(t5 - t0).toFixed(0)}ms`);
 
         shellMesh.geometry.dispose();
         shellMesh.geometry = cleanGeom;
-
-        mergedDrills.dispose();
       });
     }
 
     p.bakeHoles = false;
+    p.bakeTubes = false;
+    p.previewTubes = false;
   }
 
   shellMesh.castShadow = true;

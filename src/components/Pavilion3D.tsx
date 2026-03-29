@@ -8,12 +8,15 @@ import { buildPavilion } from '../pavilion_3d/pavilion/index.js';
 import { setupGUI } from '../pavilion_3d/gui.js';
 import { captureScreenshot, exportGLTF, exportOBJ, exportSTL } from '../pavilion_3d/utils/export.js';
 import { importModelFile } from '../pavilion_3d/utils/importModel.js';
-import type { DotCircle } from './MergedFingerprintsCanvas';
+import type { DotCircle, Streamline } from './MergedFingerprintsCanvas';
 
 interface Pavilion3DProps {
     fingerprintCanvas: HTMLCanvasElement | null;
     bakeHolesTrigger?: number;
+    bakeTubesTrigger?: number;
+    previewTubesTrigger?: number;
     dotCircles?: DotCircle[];
+    streamlines?: Streamline[];
     onBaseGeometryUpdate?: (geom: THREE.BufferGeometry | null) => void;
     editing3D?: boolean;
     fabricEnabled?: boolean;
@@ -31,7 +34,7 @@ export interface Pavilion3DHandle {
     } | null;
 }
 
-export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, dotCircles = [], onBaseGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [], metaballs = [] }, ref) {
+export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, bakeTubesTrigger = 0, previewTubesTrigger = 0, dotCircles = [], streamlines = [], onBaseGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [], metaballs = [] }, ref) {
     const mountRef = useRef<HTMLDivElement>(null);
     const onBaseGeomRef = useRef(onBaseGeometryUpdate);
     onBaseGeomRef.current = onBaseGeometryUpdate;
@@ -190,7 +193,9 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
         } : null,
     }), []);
 
-    const lastBakeTriggerRef = useRef(0);
+    const lastBakeHolesTriggerRef = useRef(0);
+    const lastBakeTubesTriggerRef = useRef(0);
+    const lastPreviewTubesTriggerRef = useRef(0);
 
     useEffect(() => {
         if (engineRef.current && fingerprintCanvas && engineRef.current.params.skinType === 'fingerprint') {
@@ -205,16 +210,29 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
             }
             engineRef.current.params._fingerprintTexture = tex;
             engineRef.current.params._fingerprintCircles = dotCircles;
+            engineRef.current.params._fingerprintLines = streamlines;
             engineRef.current.params._fingerprintCanvasWidth = fingerprintCanvas.width;
             engineRef.current.params._fingerprintCanvasHeight = fingerprintCanvas.height;
             
-            const isNewBake = bakeHolesTrigger > 0 && bakeHolesTrigger !== lastBakeTriggerRef.current;
-            if (isNewBake) {
-                lastBakeTriggerRef.current = bakeHolesTrigger;
+            const isNewBakeHoles = bakeHolesTrigger > 0 && bakeHolesTrigger !== lastBakeHolesTriggerRef.current;
+            if (isNewBakeHoles) {
+                lastBakeHolesTriggerRef.current = bakeHolesTrigger;
             }
-            engineRef.current.params.bakeHoles = isNewBake;
+            engineRef.current.params.bakeHoles = isNewBakeHoles;
 
-            if (isNewBake) {
+            const isNewBakeTubes = bakeTubesTrigger > 0 && bakeTubesTrigger !== lastBakeTubesTriggerRef.current;
+            if (isNewBakeTubes) {
+                lastBakeTubesTriggerRef.current = bakeTubesTrigger;
+            }
+            engineRef.current.params.bakeTubes = isNewBakeTubes;
+
+            const isNewPreviewTubes = previewTubesTrigger > 0 && previewTubesTrigger !== lastPreviewTubesTriggerRef.current;
+            if (isNewPreviewTubes) {
+                lastPreviewTubesTriggerRef.current = previewTubesTrigger;
+            }
+            engineRef.current.params.previewTubes = isNewPreviewTubes;
+
+            if (isNewBakeHoles || isNewBakeTubes || isNewPreviewTubes) {
                 // Full rebuild with CSG holes
                 const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
                 onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
@@ -251,7 +269,7 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                 engineRef.current.params.skinType = 'fingerprint';
             }
         }
-    }, [fingerprintCanvas, bakeHolesTrigger, dotCircles, editing3D]);
+    }, [fingerprintCanvas, bakeHolesTrigger, bakeTubesTrigger, previewTubesTrigger, dotCircles, streamlines, editing3D]);
 
     useEffect(() => {
         if (engineRef.current) {

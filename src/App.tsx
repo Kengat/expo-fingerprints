@@ -14,8 +14,8 @@ import type { FabricItem } from './components/FabricCanvas';
 import { FingerprintEditor3D } from './components/FingerprintEditor3D.tsx';
 import { MetaballEditor3D } from './components/MetaballEditor3D';
 import type { MetaballData } from './components/MetaballEditor3D';
-import { MergedFingerprintsCanvas, computeFitView, renderFingerprints, UV_SIZE, collectDotCircles, getComputedItems, createGeometryEdgeDistField } from './components/MergedFingerprintsCanvas';
-import type { DotCircle, CanvasItem, EdgeDistanceField } from './components/MergedFingerprintsCanvas';
+import { MergedFingerprintsCanvas, computeFitView, renderFingerprints, UV_SIZE, collectDotCircles, getComputedItems, createGeometryEdgeDistField, collectStreamlines } from './components/MergedFingerprintsCanvas';
+import type { DotCircle, CanvasItem, EdgeDistanceField, Streamline } from './components/MergedFingerprintsCanvas';
 import { DEFAULT_DOTS_PARAMS, FingerprintParams } from './presets';
 
 const LOCAL_DEFAULT_DOTS_PARAMS: FingerprintParams = {
@@ -84,7 +84,10 @@ export default function App() {
   const [fabricItems, setFabricItems] = useState<FabricItem[]>([]);
   const [fingerprintCanvas, setFingerprintCanvas] = useState<HTMLCanvasElement | null>(null);
   const [bakeHolesTrigger, setBakeHolesTrigger] = useState<number>(0);
+  const [bakeTubesTrigger, setBakeTubesTrigger] = useState<number>(0);
+  const [previewTubesTrigger, setPreviewTubesTrigger] = useState<number>(0);
   const [dotCircles, setDotCircles] = useState<DotCircle[]>([]);
+  const [streamlines, setStreamlines] = useState<Streamline[]>([]);
   const [baseGeometry, setBaseGeometry] = useState<THREE.BufferGeometry | null>(null);
 
   const editorCanvasRef = useRef<{ getCanvas: () => HTMLCanvasElement | null; getDotCircles: () => DotCircle[] }>(null);
@@ -143,7 +146,7 @@ export default function App() {
     }
   }, [globalSettings.edgeCullRadius, edgeDistField]);
 
-  const generateTextureAndCircles = (currentItems: CanvasItem[], currentSettings: any) => {
+  const generateTextureAndData = (currentItems: CanvasItem[], currentSettings: any) => {
     const texSize = UV_SIZE;
     const offscreen = document.createElement('canvas');
     offscreen.width = texSize;
@@ -157,22 +160,42 @@ export default function App() {
     }
     
     const circles = collectDotCircles(computed, fixedView, currentSettings.cullingOffset, currentSettings.edgeCullRadius ?? 0, edgeDistField, currentSettings);
-    return { canvas: offscreen, circles };
+    const lines = collectStreamlines(computed, fixedView, currentSettings.cullingOffset, currentSettings.edgeCullRadius ?? 0, edgeDistField, currentSettings);
+    return { canvas: offscreen, circles, lines };
   };
 
   const applyPatternPreview = () => {
-    const { canvas } = generateTextureAndCircles(items, globalSettings);
+    const { canvas } = generateTextureAndData(items, globalSettings);
     setFingerprintCanvas(canvas);
     setDotCircles([]);
+    setStreamlines([]);
     setBakeHolesTrigger(0);
+    setBakeTubesTrigger(0);
+    setPreviewTubesTrigger(0);
     setIsEditingPattern(false);
   };
 
-  const applyPatternBake = () => {
-    const { canvas, circles } = generateTextureAndCircles(items, globalSettings);
+  const applyPatternPreviewTubes = () => {
+    const { canvas, lines } = generateTextureAndData(items, globalSettings);
+    setFingerprintCanvas(canvas);
+    setStreamlines(lines);
+    setPreviewTubesTrigger(Date.now());
+    setIsEditingPattern(false);
+  };
+
+  const applyPatternBakeHoles = () => {
+    const { canvas, circles } = generateTextureAndData(items, globalSettings);
     setFingerprintCanvas(canvas);
     setDotCircles(circles);
     setBakeHolesTrigger(Date.now());
+    setIsEditingPattern(false);
+  };
+
+  const applyPatternBakeTubes = () => {
+    const { canvas, lines } = generateTextureAndData(items, globalSettings);
+    setFingerprintCanvas(canvas);
+    setStreamlines(lines);
+    setBakeTubesTrigger(Date.now());
     setIsEditingPattern(false);
   };
 
@@ -244,10 +267,12 @@ export default function App() {
           }
           
           // Force a re-render/re-bake
-          const { canvas, circles } = generateTextureAndCircles(data.items || items, data.globalSettings || globalSettings);
+          const { canvas, circles, lines } = generateTextureAndData(data.items || items, data.globalSettings || globalSettings);
           setFingerprintCanvas(canvas);
           setDotCircles(circles);
-          setBakeHolesTrigger(Date.now());
+          setStreamlines(lines);
+          setBakeTubesTrigger(Date.now());
+          setPreviewTubesTrigger(0);
         }
       } catch (err) {
         console.error('Failed to load project:', err);
@@ -273,7 +298,10 @@ export default function App() {
           ref={pavilion3DRef}
           fingerprintCanvas={fingerprintCanvas}
           bakeHolesTrigger={bakeHolesTrigger}
+          bakeTubesTrigger={bakeTubesTrigger}
+          previewTubesTrigger={previewTubesTrigger}
           dotCircles={dotCircles}
+          streamlines={streamlines}
           onBaseGeometryUpdate={setBaseGeometry}
           editing3D={isEditing3D}
           fabricEnabled={fabricEnabled}
@@ -331,7 +359,23 @@ export default function App() {
             {isEditing3D ? 'Exit 3D Edit' : 'Edit 3D Mode'}
           </button>
           <button
-            onClick={applyPatternBake}
+            onClick={applyPatternPreviewTubes}
+            className="flex items-center gap-3 bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-300 px-6 py-3 rounded-xl transition-all font-medium border border-indigo-400/30"
+            title="Preview 3D tubes visually before baking"
+          >
+            <Waves className="w-5 h-5" />
+            Preview 3D Tubes
+          </button>
+          <button
+            onClick={applyPatternBakeTubes}
+            className="flex items-center gap-3 bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(79,70,229,0.3)] transition-all font-medium border border-indigo-400/30"
+            title="Calculates extruded 3D tubes from streamlines"
+          >
+            <Waves className="w-5 h-5" />
+            Bake 3D Tubes
+          </button>
+          <button
+            onClick={applyPatternBakeHoles}
             className="flex items-center gap-3 bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all font-medium border border-emerald-400/30"
             title="Calculates actual circular geometry holes via CSG"
           >

@@ -46,6 +46,7 @@ export const params = {
   fpRidgeSpacing: 14,
   fpDotSize: 3.5,
   fpDotGap: 9,
+  fpLineExtrusion: 2.0,
   fpBackgroundOpacity: 0.3,
   fpSeed: 42,
   fpShowPreview: true,
