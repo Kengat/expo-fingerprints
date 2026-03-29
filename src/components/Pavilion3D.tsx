@@ -15,6 +15,7 @@ interface Pavilion3DProps {
     bakeHolesTrigger?: number;
     bakeTubesTrigger?: number;
     previewTubesTrigger?: number;
+    showSolidCheck?: boolean;
     dotCircles?: DotCircle[];
     streamlines?: Streamline[];
     onBaseGeometryUpdate?: (geom: THREE.BufferGeometry | null) => void;
@@ -34,7 +35,7 @@ export interface Pavilion3DHandle {
     } | null;
 }
 
-export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, bakeTubesTrigger = 0, previewTubesTrigger = 0, dotCircles = [], streamlines = [], onBaseGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [], metaballs = [] }, ref) {
+export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, bakeTubesTrigger = 0, previewTubesTrigger = 0, showSolidCheck = false, dotCircles = [], streamlines = [], onBaseGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [], metaballs = [] }, ref) {
     const mountRef = useRef<HTMLDivElement>(null);
     const onBaseGeomRef = useRef(onBaseGeometryUpdate);
     onBaseGeomRef.current = onBaseGeometryUpdate;
@@ -231,6 +232,7 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                 lastPreviewTubesTriggerRef.current = previewTubesTrigger;
             }
             engineRef.current.params.previewTubes = isNewPreviewTubes;
+            engineRef.current.params.previewSolidCheck = showSolidCheck;
 
             if (isNewBakeHoles || isNewBakeTubes || isNewPreviewTubes) {
                 // Full rebuild with CSG holes
@@ -269,7 +271,7 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                 engineRef.current.params.skinType = 'fingerprint';
             }
         }
-    }, [fingerprintCanvas, bakeHolesTrigger, bakeTubesTrigger, previewTubesTrigger, dotCircles, streamlines, editing3D]);
+    }, [fingerprintCanvas, bakeHolesTrigger, bakeTubesTrigger, previewTubesTrigger, showSolidCheck, dotCircles, streamlines, editing3D]);
 
     useEffect(() => {
         if (engineRef.current) {

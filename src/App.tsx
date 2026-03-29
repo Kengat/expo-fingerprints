@@ -5,7 +5,7 @@
 
 import React, { useState, useRef } from 'react';
 import * as THREE from 'three';
-import { Fingerprint, MonitorPlay, X, Box, Save, FolderOpen, Waves, Circle, Download } from 'lucide-react';
+import { Fingerprint, MonitorPlay, X, Box, Save, FolderOpen, Waves, Circle, Download, Eye } from 'lucide-react';
 import { Pavilion3D } from './components/Pavilion3D';
 import type { Pavilion3DHandle } from './components/Pavilion3D';
 import { WhorlCanvas } from './components/WhorlCanvas';
@@ -86,6 +86,7 @@ export default function App() {
   const [bakeHolesTrigger, setBakeHolesTrigger] = useState<number>(0);
   const [bakeTubesTrigger, setBakeTubesTrigger] = useState<number>(0);
   const [previewTubesTrigger, setPreviewTubesTrigger] = useState<number>(0);
+  const [showSolidCheck, setShowSolidCheck] = useState<boolean>(false);
   const [dotCircles, setDotCircles] = useState<DotCircle[]>([]);
   const [streamlines, setStreamlines] = useState<Streamline[]>([]);
   const [baseGeometry, setBaseGeometry] = useState<THREE.BufferGeometry | null>(null);
@@ -300,6 +301,7 @@ export default function App() {
           bakeHolesTrigger={bakeHolesTrigger}
           bakeTubesTrigger={bakeTubesTrigger}
           previewTubesTrigger={previewTubesTrigger}
+          showSolidCheck={showSolidCheck}
           dotCircles={dotCircles}
           streamlines={streamlines}
           onBaseGeometryUpdate={setBaseGeometry}
@@ -357,6 +359,18 @@ export default function App() {
           >
             <Box className="w-5 h-5" />
             {isEditing3D ? 'Exit 3D Edit' : 'Edit 3D Mode'}
+          </button>
+          <button
+            onClick={() => setShowSolidCheck(!showSolidCheck)}
+            className={`flex items-center gap-3 px-6 py-3 rounded-xl transition-all font-medium border ${
+              showSolidCheck
+                ? 'bg-emerald-500/30 hover:bg-emerald-500/50 text-emerald-300 border-emerald-400/50'
+                : 'bg-slate-700/50 hover:bg-slate-600/60 text-slate-300 border-slate-500/30'
+            }`}
+            title="Toggle solid check: green = solid (manifold), red = not solid"
+          >
+            <Eye className="w-5 h-5" />
+            {showSolidCheck ? 'Solid Check: ON' : 'Solid Check: OFF'}
           </button>
           <button
             onClick={applyPatternPreviewTubes}

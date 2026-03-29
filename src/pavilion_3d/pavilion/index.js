@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { createShellGeometry, getShellFunction, stitchGeometrySeam, thickenGeometry, thickenGeometryGeneric } from './shell.js';
 import { applyDeformations } from './deform.js';
 import { createRibs, createColumns } from './structure.js';
@@ -230,67 +231,157 @@ function buildDrillGeometriesFromMesh(circles, canvasW, canvasH, geometry, thick
   return drillGeometries;
 }
 
+/**
+ * Create a watertight, manifold tube geometry with smooth hemisphere end caps.
+ * Builds vertices directly from Frenet frames with exactly `radialSegments`
+ * per ring and uses modulo wrapping, so every edge is shared by exactly 2 faces.
+ * Hemisphere caps are derived from actual ring vertex positions (not Frenet N/B)
+ * for robustness at high-curvature areas where Frenet frames can become unstable.
+ */
 function createClosedTubeGeometry(curve, tubularSegments, radius, radialSegments) {
-  const tubeGeom = new THREE.TubeGeometry(curve, tubularSegments, radius, radialSegments, false);
-  const pos = tubeGeom.getAttribute('position');
-  const index = tubeGeom.getIndex();
-  const newPos = [];
-  const newIndex = [];
-  
-  for (let i = 0; i < pos.count; i++) {
-    newPos.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+  const frames = curve.computeFrenetFrames(tubularSegments, false);
+  const positions = [];
+  const indices = [];
+  const CAP_RINGS = 4; // latitude rings on each hemisphere cap
+
+  // 1. Generate tube ring vertices — exactly radialSegments per ring
+  for (let i = 0; i <= tubularSegments; i++) {
+    const P = curve.getPointAt(i / tubularSegments);
+    const N = frames.normals[i];
+    const B = frames.binormals[i];
+
+    for (let j = 0; j < radialSegments; j++) {
+      const theta = (j / radialSegments) * Math.PI * 2;
+      const sinT = Math.sin(theta);
+      const cosT = Math.cos(theta);
+
+      positions.push(
+        P.x + radius * (cosT * N.x + sinT * B.x),
+        P.y + radius * (cosT * N.y + sinT * B.y),
+        P.z + radius * (cosT * N.z + sinT * B.z)
+      );
+    }
   }
-  for (let i = 0; i < index.count; i++) {
-    newIndex.push(index.getX(i));
+
+  // 2. Generate tube body quad faces (two triangles per quad)
+  for (let i = 0; i < tubularSegments; i++) {
+    for (let j = 0; j < radialSegments; j++) {
+      const a = i * radialSegments + j;
+      const b = i * radialSegments + (j + 1) % radialSegments;
+      const c = (i + 1) * radialSegments + (j + 1) % radialSegments;
+      const d = (i + 1) * radialSegments + j;
+
+      indices.push(a, b, d);
+      indices.push(b, c, d);
+    }
   }
-  
-  // Start cap (Flat)
-  let startCenterX = 0, startCenterY = 0, startCenterZ = 0;
-  for (let i = 0; i < radialSegments; i++) {
-    startCenterX += pos.getX(i);
-    startCenterY += pos.getY(i);
-    startCenterZ += pos.getZ(i);
+
+  // Helper: compute ring center from actual vertex positions
+  function getRingCenter(ringStartIdx) {
+    let cx = 0, cy = 0, cz = 0;
+    for (let j = 0; j < radialSegments; j++) {
+      const idx = (ringStartIdx + j) * 3;
+      cx += positions[idx];
+      cy += positions[idx + 1];
+      cz += positions[idx + 2];
+    }
+    return new THREE.Vector3(cx / radialSegments, cy / radialSegments, cz / radialSegments);
   }
-  startCenterX /= radialSegments;
-  startCenterY /= radialSegments;
-  startCenterZ /= radialSegments;
-  
-  const startCenterIdx = newPos.length / 3;
-  newPos.push(startCenterX, startCenterY, startCenterZ);
-  for(let i = 0; i < radialSegments; i++) {
-     newIndex.push(startCenterIdx, i + 1, i);
+
+  // Helper: build hemisphere cap from actual ring vertex positions
+  // tangent: unit vector pointing outward from tube end (away from tube body)
+  // flipWinding: true for start cap (rings go opposite to tube body), false for end cap
+  function buildHemisphereCap(ringStartIdx, tangent, flipWinding) {
+    const center = getRingCenter(ringStartIdx);
+    let prevRingStart = ringStartIdx;
+
+    for (let ring = 1; ring <= CAP_RINGS; ring++) {
+      const phi = (ring / CAP_RINGS) * (Math.PI / 2);
+      const cosP = Math.cos(phi);
+      const sinP = Math.sin(phi);
+
+      if (ring < CAP_RINGS) {
+        // Intermediate ring — shrink radially from actual ring, offset along tangent
+        const currentRingStart = positions.length / 3;
+        for (let j = 0; j < radialSegments; j++) {
+          const origIdx = (ringStartIdx + j) * 3;
+          const dx = positions[origIdx] - center.x;
+          const dy = positions[origIdx + 1] - center.y;
+          const dz = positions[origIdx + 2] - center.z;
+
+          positions.push(
+            center.x + cosP * dx + sinP * radius * tangent.x,
+            center.y + cosP * dy + sinP * radius * tangent.y,
+            center.z + cosP * dz + sinP * radius * tangent.z
+          );
+        }
+
+        // Connect this ring to the previous ring with quads
+        for (let j = 0; j < radialSegments; j++) {
+          const a = prevRingStart + j;
+          const b = prevRingStart + (j + 1) % radialSegments;
+          const c = currentRingStart + (j + 1) % radialSegments;
+          const d = currentRingStart + j;
+
+          if (flipWinding) {
+            indices.push(a, d, b);
+            indices.push(b, d, c);
+          } else {
+            indices.push(a, b, d);
+            indices.push(b, c, d);
+          }
+        }
+
+        prevRingStart = currentRingStart;
+      } else {
+        // Pole vertex
+        const poleIdx = positions.length / 3;
+        positions.push(
+          center.x + radius * tangent.x,
+          center.y + radius * tangent.y,
+          center.z + radius * tangent.z
+        );
+
+        for (let j = 0; j < radialSegments; j++) {
+          if (flipWinding) {
+            indices.push(prevRingStart + j, poleIdx, prevRingStart + (j + 1) % radialSegments);
+          } else {
+            indices.push(prevRingStart + (j + 1) % radialSegments, poleIdx, prevRingStart + j);
+          }
+        }
+      }
+    }
   }
-  
-  // End cap (Flat)
-  let endCenterX = 0, endCenterY = 0, endCenterZ = 0;
-  const endRingStart = tubularSegments * (radialSegments + 1);
-  for (let i = 0; i < radialSegments; i++) {
-    endCenterX += pos.getX(endRingStart + i);
-    endCenterY += pos.getY(endRingStart + i);
-    endCenterZ += pos.getZ(endRingStart + i);
+
+  // 3. Start cap — tangent points outward from tube start, needs flipped winding
+  const startCenter = getRingCenter(0);
+  const nextCenter = getRingCenter(radialSegments);
+  const startTangent = new THREE.Vector3().subVectors(startCenter, nextCenter).normalize();
+  if (startTangent.lengthSq() < 0.5) {
+    startTangent.copy(curve.getTangentAt(0).normalize().negate());
   }
-  endCenterX /= radialSegments;
-  endCenterY /= radialSegments;
-  endCenterZ /= radialSegments;
-  
-  const endCenterIdx = newPos.length / 3;
-  newPos.push(endCenterX, endCenterY, endCenterZ);
-  for (let i = 0; i < radialSegments; i++) {
-    newIndex.push(endCenterIdx, endRingStart + i, endRingStart + i + 1);
+  buildHemisphereCap(0, startTangent, true);
+
+  // 4. End cap — tangent points outward from tube end, normal winding
+  const endRingStart = tubularSegments * radialSegments;
+  const endCenter = getRingCenter(endRingStart);
+  const prevCenter = getRingCenter((tubularSegments - 1) * radialSegments);
+  const endTangent = new THREE.Vector3().subVectors(endCenter, prevCenter).normalize();
+  if (endTangent.lengthSq() < 0.5) {
+    endTangent.copy(curve.getTangentAt(1).normalize());
   }
-  
+  buildHemisphereCap(endRingStart, endTangent, false);
+
   const closedGeom = new THREE.BufferGeometry();
-  closedGeom.setAttribute('position', new THREE.Float32BufferAttribute(newPos, 3));
-  closedGeom.setIndex(new THREE.Uint32BufferAttribute(newIndex, 1));
+  closedGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  closedGeom.setIndex(indices);
   closedGeom.computeVertexNormals();
   return closedGeom;
 }
 
 function buildTubeGeometries(lines, canvasW, canvasH, shellFunc, extrusionParam) {
   const tubeGeometries = [];
-  const sphereGeometries = [];
-  // Use extrusionParam maybe as a subtle multiplier, but thickness was 2x too large.
-  // We'll scale the base radius precisely.
+  const sphereGeometries = []; // kept empty for API compat
   
   for (const line of lines) {
     if (line.length < 2) continue;
@@ -309,26 +400,13 @@ function buildTubeGeometries(lines, canvasW, canvasH, shellFunc, extrusionParam)
     
     if (points.length < 2) continue;
     
-    // totalRadius is accumulating radius based on thickness (which is diameter)
-    // We want the true radius:
     const avgRadius = (totalRadius / points.length) * 0.5;
     
     const curve = new THREE.CatmullRomCurve3(points, false, 'chordal');
     const segments = Math.max(8, Math.floor(points.length * 1.5));
+    // Hemisphere caps are now built into the manifold tube geometry
     const closedGeom = createClosedTubeGeometry(curve, segments, avgRadius, 8);
     tubeGeometries.push(closedGeom);
-
-    // Create start and end spheres for rounded caps
-    const sphereGeomStart = new THREE.SphereGeometry(avgRadius, 8, 8);
-    sphereGeomStart.translate(points[0].x, points[0].y, points[0].z);
-    sphereGeomStart.deleteAttribute('uv');
-    sphereGeometries.push(sphereGeomStart);
-
-    const lastPt = points[points.length - 1];
-    const sphereGeomEnd = new THREE.SphereGeometry(avgRadius, 8, 8);
-    sphereGeomEnd.translate(lastPt.x, lastPt.y, lastPt.z);
-    sphereGeomEnd.deleteAttribute('uv');
-    sphereGeometries.push(sphereGeomEnd);
   }
   return { tubeGeometries, sphereGeometries };
 }
@@ -379,7 +457,7 @@ function buildTubeGeometriesFromMesh(lines, canvasW, canvasH, geometry, extrusio
   }
 
   const tubeGeometries = [];
-  const sphereGeometries = [];
+  const sphereGeometries = []; // kept empty for API compat
   for (const line of lines) {
     if (line.length < 2) continue;
     const points = [];
@@ -415,19 +493,9 @@ function buildTubeGeometriesFromMesh(lines, canvasW, canvasH, geometry, extrusio
     const avgRadius = (totalRadius / points.length) * 0.5;
     const curve = new THREE.CatmullRomCurve3(points, false, 'chordal');
     const segments = Math.max(8, Math.floor(points.length * 1.5));
+    // Hemisphere caps are now built into the manifold tube geometry
     const closedGeom = createClosedTubeGeometry(curve, segments, avgRadius, 8);
     tubeGeometries.push(closedGeom);
-
-    const sphereGeomStart = new THREE.SphereGeometry(avgRadius, 8, 8);
-    sphereGeomStart.translate(points[0].x, points[0].y, points[0].z);
-    sphereGeomStart.deleteAttribute('uv');
-    sphereGeometries.push(sphereGeomStart);
-
-    const lastPt = points[points.length - 1];
-    const sphereGeomEnd = new THREE.SphereGeometry(avgRadius, 8, 8);
-    sphereGeomEnd.translate(lastPt.x, lastPt.y, lastPt.z);
-    sphereGeomEnd.deleteAttribute('uv');
-    sphereGeometries.push(sphereGeomEnd);
   }
   return { tubeGeometries, sphereGeometries };
 }
@@ -498,7 +566,10 @@ function buildSinglePavilion(p) {
     Array.isArray(p._fingerprintLines) &&
     p._fingerprintLines.length > 0;
 
-  const thickness = hasVectorCircles ? 5.0 : 0;
+  // Thicken shell for CSG operations (holes need subtraction, tubes need union)
+  // Preview tubes don't need thickening since they bypass CSG
+  const needsCSG = hasVectorCircles || (hasVectorLines && p.bakeTubes);
+  const thickness = needsCSG ? 5.0 : 0;
 
   let shellGeom;
 
@@ -542,7 +613,18 @@ function buildSinglePavilion(p) {
 
     // 5. Thicken it into a solid manifold (if needed for CSG)
     if (thickness > 0) {
-      shellGeom = thickenGeometry(shellGeom, thickness);
+      if (hasVectorLines && p.bakeTubes) {
+        // For tube baking: merge duplicate vertices at seams first.
+        // On curved surfaces, duplicate seam vertices get different averaged normals,
+        // causing micro-gaps in the offset surface that break tube grooves.
+        // mergeVertices() collapses them → single vertex → single normal → clean offset.
+        // Use thickenGeometryGeneric since mergeVertices breaks the grid structure.
+        shellGeom = mergeVertices(shellGeom, 0.001);
+        shellGeom.computeVertexNormals();
+        shellGeom = thickenGeometryGeneric(shellGeom, thickness);
+      } else {
+        shellGeom = thickenGeometry(shellGeom, thickness);
+      }
     }
   }
 
@@ -616,25 +698,87 @@ function buildSinglePavilion(p) {
     }
 
     if (p.previewTubes && tubeGeometries.length > 0) {
-      const allTubesForPreview = [...tubeGeometries, ...sphereGeometries];
+      const allTubeGeomsForPreview = tubeGeometries.slice();
       tubeGeometries = []; // Clear tube geometries so we bypass CSG union for previews
       sphereGeometries = [];
       
-      import('three/addons/utils/BufferGeometryUtils.js').then(({ mergeGeometries }) => {
-        const mergedTubes = mergeGeometries(allTubesForPreview, false);
-        const materialColor = new THREE.Color(p.materialColor).multiplyScalar(0.75); // Darken match
-        const tubeMat = new THREE.MeshStandardMaterial({
-          color: materialColor, 
-          roughness: p.roughness || 0.6,
-          metalness: p.metalness || 0.1,
-          side: THREE.DoubleSide
+      if (p.previewSolidCheck) {
+        // Per-tube solid check mode: each tube gets its own mesh with green/red color
+        import('manifold-3d').then(async ({ default: Module }) => {
+          const m = await Module();
+          m.setup();
+
+          function isSolidGeometry(geom) {
+            try {
+              const g = geom.clone();
+              if (!g.index) {
+                const posCount = g.attributes.position.count;
+                const idx = new Uint32Array(posCount);
+                for (let k = 0; k < posCount; k++) idx[k] = k;
+                g.setIndex(new THREE.BufferAttribute(idx, 1));
+              }
+              const pos = g.attributes.position;
+              const numProp = 3;
+              const props = new Float32Array(pos.count * numProp);
+              for (let k = 0; k < pos.count; k++) {
+                props[k * 3] = pos.getX(k);
+                props[k * 3 + 1] = pos.getY(k);
+                props[k * 3 + 2] = pos.getZ(k);
+              }
+              const mesh = new m.Mesh({
+                numProp,
+                vertProperties: props,
+                triVerts: new Uint32Array(g.index.array),
+              });
+              mesh.merge();
+              const manifold = new m.Manifold(mesh);
+              const vol = manifold.volume();
+              return vol > 0;
+            } catch (e) {
+              return false;
+            }
+          }
+
+          const solidMatGreen = new THREE.MeshStandardMaterial({
+            color: 0x22c55e, roughness: 0.5, metalness: 0.1, side: THREE.DoubleSide
+          });
+          const solidMatRed = new THREE.MeshStandardMaterial({
+            color: 0xef4444, roughness: 0.5, metalness: 0.1, side: THREE.DoubleSide
+          });
+
+          let solidCount = 0;
+          for (let i = 0; i < allTubeGeomsForPreview.length; i++) {
+            const tubeGeom = allTubeGeomsForPreview[i];
+            const solid = isSolidGeometry(tubeGeom);
+            if (solid) solidCount++;
+            const mat = solid ? solidMatGreen : solidMatRed;
+            const mesh = new THREE.Mesh(tubeGeom, mat);
+            mesh.name = 'preview-tube-solid';
+            pavilionGroup.add(mesh);
+          }
+
+          console.log(`[Preview] Solid check: ${solidCount}/${allTubeGeomsForPreview.length} tubes are solid`);
+        }).catch(err => {
+          console.error('[Preview] Solid check failed:', err);
         });
-        const tubeMesh = new THREE.Mesh(mergedTubes, tubeMat);
-        tubeMesh.name = 'preview-tubes';
-        pavilionGroup.add(tubeMesh);
-      }).catch(err => {
-        console.error('[Preview] Failed to generate mesh:', err);
-      });
+      } else {
+        // Standard merged preview (no solid check)
+        import('three/addons/utils/BufferGeometryUtils.js').then(({ mergeGeometries }) => {
+          const mergedTubes = mergeGeometries(allTubeGeomsForPreview, false);
+          const materialColor = new THREE.Color(p.materialColor).multiplyScalar(0.75);
+          const tubeMat = new THREE.MeshStandardMaterial({
+            color: materialColor, 
+            roughness: p.roughness || 0.6,
+            metalness: p.metalness || 0.1,
+            side: THREE.DoubleSide
+          });
+          const tubeMesh = new THREE.Mesh(mergedTubes, tubeMat);
+          tubeMesh.name = 'preview-tubes';
+          pavilionGroup.add(tubeMesh);
+        }).catch(err => {
+          console.error('[Preview] Failed to generate mesh:', err);
+        });
+      }
     }
 
     if (drillGeometries.length > 0 || tubeGeometries.length > 0) {
@@ -647,7 +791,9 @@ function buildSinglePavilion(p) {
         const m = await Module();
         m.setup();
 
-        function geometryToManifold(geom, isDrill = false) {
+        // originalID mapping: 0=outer shell (thickened), 1=inner shell (original surface),
+        // 2=edge stitching, 3=drill surfaces, 4=tube surfaces
+        function geometryToManifold(geom, isDrill = false, isTube = false) {
           geom = geom.clone();
           if (!geom.index) {
             const posCount = geom.attributes.position.count;
@@ -670,10 +816,11 @@ function buildSinglePavilion(p) {
             }
           }
 
+          const defaultID = isDrill ? 3 : (isTube ? 4 : 0);
           let runIndex = new Uint32Array([0, geom.index.count]);
-          let runOriginalID = new Uint32Array([isDrill ? 3 : 0]);
+          let runOriginalID = new Uint32Array([defaultID]);
 
-          if (!isDrill && geom.groups && geom.groups.length > 0) {
+          if (!isDrill && !isTube && geom.groups && geom.groups.length > 0) {
             runIndex = new Uint32Array(geom.groups.length + 1);
             runOriginalID = new Uint32Array(geom.groups.length);
             runIndex[0] = 0;
@@ -707,18 +854,10 @@ function buildSinglePavilion(p) {
 
         if (tubeGeometries.length > 0) {
           const mergedTubes = mergeGeomsUtil(tubeGeometries, false);
-          const tubeManifold = geometryToManifold(mergedTubes, false);
+          const tubeManifold = geometryToManifold(mergedTubes, false, true);
           console.log('[Bake] Tube Manifold Status:', tubeManifold.status(), 'Volume:', tubeManifold.volume());
-          resultManifold = m.Manifold.union(resultManifold, tubeManifold);
+          resultManifold = m.Manifold.difference(resultManifold, tubeManifold);
           mergedTubes.dispose();
-
-          if (sphereGeometries.length > 0) {
-            const mergedSpheres = mergeGeomsUtil(sphereGeometries, false);
-            const sphereManifold = geometryToManifold(mergedSpheres, false);
-            console.log('[Bake] Sphere Manifold Status:', sphereManifold.status());
-            resultManifold = m.Manifold.union(resultManifold, sphereManifold);
-            mergedSpheres.dispose();
-          }
         }
 
         console.log('[Bake] Final Result Manifold Status:', resultManifold.status(), 'Volume:', resultManifold.volume());
@@ -743,21 +882,35 @@ function buildSinglePavilion(p) {
           }
         }
 
-        // Filter faces: keep only originalID == 1 (inner original shell surface)
-        // Flip winding order since `thickenGeometry` originally inverted it!
+        // Filter faces by originalID:
+        //   0 = outer thickened shell (strip away)
+        //   1 = inner original shell surface (keep, flip winding)
+        //   2 = edge stitching faces (strip away)
+        //   3 = drill surfaces (strip away)
+        //   4 = tube groove walls (keep, normal winding)
         const validIndices = [];
         const numRuns = outMesh.runOriginalID.length;
         for (let r = 0; r < numRuns; r++) {
           const originalID = outMesh.runOriginalID[r];
-          if (originalID === 1) {
+          if (originalID === 1 || originalID === 4) {
             const startIdx = outMesh.runIndex[r];
             const endIdx = outMesh.runIndex[r + 1];
             for (let j = startIdx; j < endIdx; j += 3) {
-              validIndices.push(
-                outMesh.triVerts[j + 2],
-                outMesh.triVerts[j + 1],
-                outMesh.triVerts[j]
-              );
+              if (originalID === 1) {
+                // Inner shell: flip winding (thickenGeometry inverted it)
+                validIndices.push(
+                  outMesh.triVerts[j + 2],
+                  outMesh.triVerts[j + 1],
+                  outMesh.triVerts[j]
+                );
+              } else {
+                // Tube groove walls: keep normal winding
+                validIndices.push(
+                  outMesh.triVerts[j],
+                  outMesh.triVerts[j + 1],
+                  outMesh.triVerts[j + 2]
+                );
+              }
             }
           }
         }
