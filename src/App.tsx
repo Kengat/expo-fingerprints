@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import { Fingerprint, MonitorPlay, X, Box, Save, FolderOpen, Waves, Circle, Download, Eye } from 'lucide-react';
 import { Pavilion3D } from './components/Pavilion3D';
 import type { Pavilion3DHandle } from './components/Pavilion3D';
+import { buildPavilion } from './pavilion_3d/pavilion/index.js';
 import { WhorlCanvas } from './components/WhorlCanvas';
 import { FabricCanvas } from './components/FabricCanvas';
 import type { FabricItem } from './components/FabricCanvas';
@@ -90,6 +91,8 @@ export default function App() {
   const [dotCircles, setDotCircles] = useState<DotCircle[]>([]);
   const [streamlines, setStreamlines] = useState<Streamline[]>([]);
   const [baseGeometry, setBaseGeometry] = useState<THREE.BufferGeometry | null>(null);
+  const [extrusionPreview, setExtrusionPreview] = useState(false);
+  const [extrusionThickness, setExtrusionThickness] = useState(5.0);
 
   const editorCanvasRef = useRef<{ getCanvas: () => HTMLCanvasElement | null; getDotCircles: () => DotCircle[] }>(null);
   const pavilion3DRef = useRef<Pavilion3DHandle>(null);
@@ -331,10 +334,62 @@ export default function App() {
         />
       )}
 
+      {/* Extrusion Preview Panel — small left-side controls */}
+      {!isEditingPattern && !isEditingFabric && (
+        <div className="absolute top-6 left-6 z-30 w-52">
+          <div className="bg-slate-800/90 backdrop-blur-sm rounded-lg border border-slate-600/50 p-3 shadow-lg">
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                className="w-4 h-4 accent-blue-500 rounded"
+                checked={extrusionPreview}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setExtrusionPreview(on);
+                  const engine = pavilion3DRef.current?.getEngine();
+                  if (!engine) return;
+                  engine.params.previewExtrusion = on;
+                  engine.params.previewExtrusionThickness = extrusionThickness;
+                  const g = buildPavilion(engine.scene, engine.params);
+                  setBaseGeometry(g.userData.baseGeometry ?? null);
+                }}
+              />
+              <span className="text-xs font-medium text-slate-200">Extrusion Preview</span>
+            </label>
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-[10px] text-slate-400 whitespace-nowrap">0.5</span>
+              <input
+                type="range"
+                min="0.5"
+                max="15"
+                step="0.5"
+                className="flex-1 h-1 accent-blue-500"
+                value={extrusionThickness}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  setExtrusionThickness(val);
+                  const engine = pavilion3DRef.current?.getEngine();
+                  if (!engine) return;
+                  engine.params.previewExtrusionThickness = val;
+                  if (extrusionPreview) {
+                    const g = buildPavilion(engine.scene, engine.params);
+                    setBaseGeometry(g.userData.baseGeometry ?? null);
+                  }
+                }}
+              />
+              <span className="text-[10px] text-slate-400 whitespace-nowrap">15</span>
+            </div>
+            <div className="text-center text-[10px] text-slate-500 mt-0.5">
+              Thickness: {extrusionThickness.toFixed(1)}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main 3D HUD (Visible only when NOT editing 2D pattern) */}
       {!isEditingPattern && !isEditingFabric && (
         <>
-        <div className="absolute top-6 left-6 z-20 flex flex-col gap-3">
+        <div className="absolute top-6 left-6 z-20 flex flex-col gap-3" style={{ marginTop: '110px' }}>
           <button
             onClick={() => setIsEditingPattern(true)}
             className="flex items-center gap-3 bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(37,99,235,0.3)] transition-all font-medium border border-blue-400/30"

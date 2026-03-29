@@ -47,6 +47,8 @@ export const params = {
   fpDotSize: 3.5,
   fpDotGap: 9,
   fpLineExtrusion: 2.0,
+  previewExtrusion: false,
+  previewExtrusionThickness: 5.0,
   fpBackgroundOpacity: 0.3,
   fpSeed: 42,
   fpShowPreview: true,

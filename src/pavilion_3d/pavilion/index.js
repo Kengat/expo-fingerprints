@@ -403,9 +403,8 @@ function buildTubeGeometries(lines, canvasW, canvasH, shellFunc, extrusionParam)
     const avgRadius = (totalRadius / points.length) * 0.5;
     
     const curve = new THREE.CatmullRomCurve3(points, false, 'chordal');
-    const segments = Math.max(8, Math.floor(points.length * 1.5));
-    // Hemisphere caps are now built into the manifold tube geometry
-    const closedGeom = createClosedTubeGeometry(curve, segments, avgRadius, 8);
+    const segments = Math.min(20, Math.max(4, Math.floor(points.length * 0.3)));
+    const closedGeom = createClosedTubeGeometry(curve, segments, avgRadius, 6);
     tubeGeometries.push(closedGeom);
   }
   return { tubeGeometries, sphereGeometries };
@@ -492,9 +491,8 @@ function buildTubeGeometriesFromMesh(lines, canvasW, canvasH, geometry, extrusio
     
     const avgRadius = (totalRadius / points.length) * 0.5;
     const curve = new THREE.CatmullRomCurve3(points, false, 'chordal');
-    const segments = Math.max(8, Math.floor(points.length * 1.5));
-    // Hemisphere caps are now built into the manifold tube geometry
-    const closedGeom = createClosedTubeGeometry(curve, segments, avgRadius, 8);
+    const segments = Math.min(20, Math.max(4, Math.floor(points.length * 0.3)));
+    const closedGeom = createClosedTubeGeometry(curve, segments, avgRadius, 6);
     tubeGeometries.push(closedGeom);
   }
   return { tubeGeometries, sphereGeometries };
@@ -566,9 +564,15 @@ function buildSinglePavilion(p) {
     Array.isArray(p._fingerprintLines) &&
     p._fingerprintLines.length > 0;
 
-  // Thicken shell for CSG operations (holes need subtraction, tubes need union)
-  // Preview tubes don't need thickening since they bypass CSG
-  const needsCSG = hasVectorCircles || (hasVectorLines && p.bakeTubes);
+  // Check if we have cached geometries from previous bakes to combine
+  const hasCachedTubes = Array.isArray(p._cachedTubeGeometries) && p._cachedTubeGeometries.length > 0;
+  const hasCachedDrills = Array.isArray(p._cachedDrillGeometries) && p._cachedDrillGeometries.length > 0;
+
+  // Thicken shell for CSG operations.
+  // needsCSG is true if we're actively baking something OR if we have cached bakes to replay
+  const needsCSG = hasVectorCircles || (hasVectorLines && p.bakeTubes)
+    || (hasCachedTubes && hasVectorCircles)   // baking holes with cached tubes
+    || (hasCachedDrills && hasVectorLines && p.bakeTubes); // baking tubes with cached drills
   const thickness = needsCSG ? 5.0 : 0;
 
   let shellGeom;
@@ -590,8 +594,15 @@ function buildSinglePavilion(p) {
 
     // Thicken into solid manifold if CSG bake is needed
     // Use generic thickener (not grid-based) for arbitrary imported meshes
+    // Strip UV/normals before merge so vertices at UV seams get merged by position only
+    // Negative thickness extrudes inward so tube grooves become craters
     if (thickness > 0) {
-      shellGeom = thickenGeometryGeneric(shellGeom, thickness);
+      const posOnly = new THREE.BufferGeometry();
+      posOnly.setAttribute('position', shellGeom.getAttribute('position').clone());
+      if (shellGeom.index) posOnly.setIndex(shellGeom.index.clone());
+      shellGeom = mergeVertices(posOnly, 0.01);
+      shellGeom.computeVertexNormals();
+      shellGeom = thickenGeometryGeneric(shellGeom, -thickness);
     }
   } else {
     // 1. Always create the thin geometry first
@@ -613,15 +624,17 @@ function buildSinglePavilion(p) {
 
     // 5. Thicken it into a solid manifold (if needed for CSG)
     if (thickness > 0) {
-      if (hasVectorLines && p.bakeTubes) {
-        // For tube baking: merge duplicate vertices at seams first.
-        // On curved surfaces, duplicate seam vertices get different averaged normals,
-        // causing micro-gaps in the offset surface that break tube grooves.
-        // mergeVertices() collapses them → single vertex → single normal → clean offset.
-        // Use thickenGeometryGeneric since mergeVertices breaks the grid structure.
-        shellGeom = mergeVertices(shellGeom, 0.001);
+      const needsTubeQualityExtrusion = (hasVectorLines && p.bakeTubes) || hasCachedTubes;
+      if (needsTubeQualityExtrusion) {
+        // For tube baking: position-only merge for continuous extrusion surface.
+        // Negative thickness extrudes inward (into the surface) so tube grooves
+        // become indentations/craters rather than bumps.
+        const posOnly = new THREE.BufferGeometry();
+        posOnly.setAttribute('position', shellGeom.getAttribute('position').clone());
+        if (shellGeom.index) posOnly.setIndex(shellGeom.index.clone());
+        shellGeom = mergeVertices(posOnly, 0.01);
         shellGeom.computeVertexNormals();
-        shellGeom = thickenGeometryGeneric(shellGeom, thickness);
+        shellGeom = thickenGeometryGeneric(shellGeom, -thickness);
       } else {
         shellGeom = thickenGeometry(shellGeom, thickness);
       }
@@ -652,9 +665,51 @@ function buildSinglePavilion(p) {
   let shellMesh = new THREE.Mesh(shellGeom, material);
   shellMesh.name = 'pavilion-shell';
 
+  // Extrusion preview: thickened shell + original as wireframe
+  if (p.previewExtrusion && !needsCSG) {
+    // Make the original shell a wireframe so you can see it's unchanged
+    material.wireframe = true;
+
+    const previewThickness = p.previewExtrusionThickness || 5.0;
+    let baseForPreview;
+    if (p.importMode && p._importedGeometry) {
+      baseForPreview = shellGeom.clone();
+    } else {
+      const previewSegments = Math.min(p.segments, 48);
+      baseForPreview = createShellGeometry({ ...p, segments: previewSegments }, 0);
+      applyDeformations(baseForPreview, p);
+      baseForPreview.computeVertexNormals();
+      if (p.shellType !== 'paraboloid') {
+        stitchGeometrySeam(baseForPreview, previewSegments);
+      }
+    }
+    // Strip all attributes except position before merging.
+    // mergeVertices compares ALL attributes — UV seams and normal splits
+    // prevent co-located vertices from merging, causing per-polygon extrusion.
+    const posOnly = new THREE.BufferGeometry();
+    posOnly.setAttribute('position', baseForPreview.getAttribute('position').clone());
+    if (baseForPreview.index) {
+      posOnly.setIndex(baseForPreview.index.clone());
+    }
+    const merged = mergeVertices(posOnly, 0.01);
+    merged.computeVertexNormals();
+    const previewGeom = thickenGeometryGeneric(merged, -previewThickness);
+    previewGeom.computeVertexNormals();
+
+    const previewMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(p.materialColor),
+      side: THREE.DoubleSide,
+      roughness: p.roughness,
+      metalness: p.metalness,
+    });
+    const previewMesh = new THREE.Mesh(previewGeom, previewMat);
+    previewMesh.name = 'extrusion-preview';
+    pavilionGroup.add(previewMesh);
+  }
+
   let bakePromise = Promise.resolve();
 
-  if (hasVectorCircles || hasVectorLines) {
+  if (hasVectorCircles || hasVectorLines || (needsCSG && (hasCachedTubes || hasCachedDrills))) {
     const t0 = performance.now();
 
     const canvasW = p._fingerprintCanvasWidth || 1920;
@@ -695,6 +750,23 @@ function buildSinglePavilion(p) {
       }
       const t2 = performance.now();
       console.log(`[Bake] Built ${tubeGeometries.length} tubes in ${(t2 - t1).toFixed(0)}ms`);
+    }
+
+    // Save current geometries to cache and merge with previously cached ones
+    if (p.bakeTubes && tubeGeometries.length > 0) {
+      p._cachedTubeGeometries = tubeGeometries.map(g => g.clone());
+    }
+    if (p.bakeHoles && drillGeometries.length > 0) {
+      p._cachedDrillGeometries = drillGeometries.map(g => g.clone());
+    }
+    // Include cached geometries from previous bakes
+    if (!p.bakeTubes && hasCachedTubes) {
+      tubeGeometries = p._cachedTubeGeometries.map(g => g.clone());
+      console.log(`[Bake] Reusing ${tubeGeometries.length} cached tube geometries`);
+    }
+    if (!p.bakeHoles && hasCachedDrills) {
+      drillGeometries = p._cachedDrillGeometries.map(g => g.clone());
+      console.log(`[Bake] Reusing ${drillGeometries.length} cached drill geometries`);
     }
 
     if (p.previewTubes && tubeGeometries.length > 0) {
