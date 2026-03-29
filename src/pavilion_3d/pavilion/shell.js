@@ -328,30 +328,38 @@ export function thickenGeometryGeneric(geometry, thickness) {
   const vec = new THREE.Vector3();
   const norm = new THREE.Vector3();
 
+  const inward = thickness < 0;
+
   for (let i = 0; i < vCount; i++) {
     vec.fromBufferAttribute(positionAttr, i);
     norm.fromBufferAttribute(normals, i);
 
-    // INNER vertex (i) — original position, inverted normal
+    // INNER vertex (i) — original position
     newPositions[i * 3] = vec.x;
     newPositions[i * 3 + 1] = vec.y;
     newPositions[i * 3 + 2] = vec.z;
-    newNormals[i * 3] = -norm.x;
-    newNormals[i * 3 + 1] = -norm.y;
-    newNormals[i * 3 + 2] = -norm.z;
+    // For inward extrusion, inner is the outermost physical surface → normal points outward
+    // For outward extrusion, inner faces inward → inverted normal
+    const innerNSign = inward ? 1 : -1;
+    newNormals[i * 3] = innerNSign * norm.x;
+    newNormals[i * 3 + 1] = innerNSign * norm.y;
+    newNormals[i * 3 + 2] = innerNSign * norm.z;
     if (uvAttr) {
       newUvs[i * 2] = uvAttr.getX(i);
       newUvs[i * 2 + 1] = uvAttr.getY(i);
     }
 
-    // OUTER vertex (i + vCount) — extruded outward
+    // OUTER vertex (i + vCount) — extruded along normal by thickness
     vec.addScaledVector(norm, thickness);
     newPositions[(i + vCount) * 3] = vec.x;
     newPositions[(i + vCount) * 3 + 1] = vec.y;
     newPositions[(i + vCount) * 3 + 2] = vec.z;
-    newNormals[(i + vCount) * 3] = norm.x;
-    newNormals[(i + vCount) * 3 + 1] = norm.y;
-    newNormals[(i + vCount) * 3 + 2] = norm.z;
+    // For inward extrusion, outer is the innermost physical surface → normal points inward
+    // For outward extrusion, outer faces outward → normal as-is
+    const outerNSign = inward ? -1 : 1;
+    newNormals[(i + vCount) * 3] = outerNSign * norm.x;
+    newNormals[(i + vCount) * 3 + 1] = outerNSign * norm.y;
+    newNormals[(i + vCount) * 3 + 2] = outerNSign * norm.z;
     if (uvAttr) {
       newUvs[(i + vCount) * 2] = uvAttr.getX(i);
       newUvs[(i + vCount) * 2 + 1] = uvAttr.getY(i);
@@ -361,13 +369,27 @@ export function thickenGeometryGeneric(geometry, thickness) {
   const oldIndices = geometry.index.array;
   const indices = [];
 
-  // Inner faces (inverted winding)
-  for (let i = 0; i < oldIndices.length; i += 3) {
-    indices.push(oldIndices[i + 2], oldIndices[i + 1], oldIndices[i]);
-  }
-  // Outer faces (normal winding, offset by vCount)
-  for (let i = 0; i < oldIndices.length; i += 3) {
-    indices.push(oldIndices[i] + vCount, oldIndices[i + 1] + vCount, oldIndices[i + 2] + vCount);
+  // When thickness is negative (inward extrusion), the inner/outer layers swap
+  // physical positions. We must swap winding order so the solid's faces
+  // consistently point outward — otherwise manifold-3d misinterprets inside/outside.
+  if (inward) {
+    // Inner faces: normal winding (they are now the outermost surface physically)
+    for (let i = 0; i < oldIndices.length; i += 3) {
+      indices.push(oldIndices[i], oldIndices[i + 1], oldIndices[i + 2]);
+    }
+    // Outer faces: inverted winding (they are physically the innermost surface)
+    for (let i = 0; i < oldIndices.length; i += 3) {
+      indices.push(oldIndices[i + 2] + vCount, oldIndices[i + 1] + vCount, oldIndices[i] + vCount);
+    }
+  } else {
+    // Inner faces (inverted winding)
+    for (let i = 0; i < oldIndices.length; i += 3) {
+      indices.push(oldIndices[i + 2], oldIndices[i + 1], oldIndices[i]);
+    }
+    // Outer faces (normal winding, offset by vCount)
+    for (let i = 0; i < oldIndices.length; i += 3) {
+      indices.push(oldIndices[i] + vCount, oldIndices[i + 1] + vCount, oldIndices[i + 2] + vCount);
+    }
   }
 
   // Find boundary edges and stitch them
@@ -391,12 +413,16 @@ export function thickenGeometryGeneric(geometry, thickness) {
     for (const [a, b] of edges) {
       const key = makeEdgeKey(a, b);
       if (edgeMap.get(key) === 1) {
-        // Boundary edge: create quad connecting inner and outer
         const innerA = a, innerB = b;
         const outerA = a + vCount, outerB = b + vCount;
-        // Two triangles for the quad
-        indices.push(innerA, innerB, outerB);
-        indices.push(innerA, outerB, outerA);
+        if (inward) {
+          // Swapped stitching order for inward extrusion
+          indices.push(innerB, innerA, outerB);
+          indices.push(outerB, innerA, outerA);
+        } else {
+          indices.push(innerA, innerB, outerB);
+          indices.push(innerA, outerB, outerA);
+        }
       }
     }
   }
@@ -408,6 +434,8 @@ export function thickenGeometryGeneric(geometry, thickness) {
   thickGeom.setIndex(indices);
 
   // Material groups for CSG filtering
+  // Inner (at original position) is always Material 1 (kept in post-processing)
+  // Outer (offset position) is always Material 0 (stripped)
   const numFaces = oldIndices.length;
   thickGeom.addGroup(0, numFaces, 1);                                 // Inner -> Material 1
   thickGeom.addGroup(numFaces, numFaces, 0);                           // Outer -> Material 0

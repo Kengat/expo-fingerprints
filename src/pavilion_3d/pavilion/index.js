@@ -573,7 +573,7 @@ function buildSinglePavilion(p) {
   const needsCSG = hasVectorCircles || (hasVectorLines && p.bakeTubes)
     || (hasCachedTubes && hasVectorCircles)   // baking holes with cached tubes
     || (hasCachedDrills && hasVectorLines && p.bakeTubes); // baking tubes with cached drills
-  const thickness = needsCSG ? 5.0 : 0;
+  const thickness = needsCSG ? 0.5 : 0;
 
   let shellGeom;
 
@@ -595,7 +595,6 @@ function buildSinglePavilion(p) {
     // Thicken into solid manifold if CSG bake is needed
     // Use generic thickener (not grid-based) for arbitrary imported meshes
     // Strip UV/normals before merge so vertices at UV seams get merged by position only
-    // Negative thickness extrudes inward so tube grooves become craters
     if (thickness > 0) {
       const posOnly = new THREE.BufferGeometry();
       posOnly.setAttribute('position', shellGeom.getAttribute('position').clone());
@@ -627,8 +626,6 @@ function buildSinglePavilion(p) {
       const needsTubeQualityExtrusion = (hasVectorLines && p.bakeTubes) || hasCachedTubes;
       if (needsTubeQualityExtrusion) {
         // For tube baking: position-only merge for continuous extrusion surface.
-        // Negative thickness extrudes inward (into the surface) so tube grooves
-        // become indentations/craters rather than bumps.
         const posOnly = new THREE.BufferGeometry();
         posOnly.setAttribute('position', shellGeom.getAttribute('position').clone());
         if (shellGeom.index) posOnly.setIndex(shellGeom.index.clone());
@@ -636,7 +633,7 @@ function buildSinglePavilion(p) {
         shellGeom.computeVertexNormals();
         shellGeom = thickenGeometryGeneric(shellGeom, -thickness);
       } else {
-        shellGeom = thickenGeometry(shellGeom, thickness);
+        shellGeom = thickenGeometry(shellGeom, -thickness);
       }
     }
   }
