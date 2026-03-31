@@ -243,23 +243,80 @@ function createClosedTubeGeometry(curve, tubularSegments, radius, radialSegments
   const positions = [];
   const indices = [];
   const CAP_RINGS = 4; // latitude rings on each hemisphere cap
+  const rings = [];
+  
+  function stabilizeEndFrame(targetIndex, neighborIndex) {
+    const tangent = frames.tangents[targetIndex].clone().normalize();
+    let normal = frames.normals[neighborIndex].clone();
+    normal.sub(tangent.clone().multiplyScalar(normal.dot(tangent)));
+
+    if (normal.lengthSq() < 1e-8) {
+      normal = frames.binormals[neighborIndex].clone();
+      normal.sub(tangent.clone().multiplyScalar(normal.dot(tangent)));
+    }
+
+    if (normal.lengthSq() < 1e-8) return;
+
+    normal.normalize();
+    const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+    const orthoNormal = new THREE.Vector3().crossVectors(binormal, tangent).normalize();
+    frames.normals[targetIndex] = orthoNormal;
+    frames.binormals[targetIndex] = binormal;
+  }
+
+  if (tubularSegments >= 2) {
+    stabilizeEndFrame(0, 1);
+    stabilizeEndFrame(tubularSegments, tubularSegments - 1);
+  }
 
   // 1. Generate tube ring vertices — exactly radialSegments per ring
   for (let i = 0; i <= tubularSegments; i++) {
     const P = curve.getPointAt(i / tubularSegments);
     const N = frames.normals[i];
     const B = frames.binormals[i];
+    const ring = [];
 
     for (let j = 0; j < radialSegments; j++) {
       const theta = (j / radialSegments) * Math.PI * 2;
       const sinT = Math.sin(theta);
       const cosT = Math.cos(theta);
 
-      positions.push(
+      ring.push(new THREE.Vector3(
         P.x + radius * (cosT * N.x + sinT * B.x),
         P.y + radius * (cosT * N.y + sinT * B.y),
         P.z + radius * (cosT * N.z + sinT * B.z)
-      );
+      ));
+    }
+
+    rings.push(ring);
+  }
+
+  for (let i = 1; i <= tubularSegments; i++) {
+    const prevRing = rings[i - 1];
+    const ring = rings[i];
+    let bestShift = 0;
+    let bestScore = Infinity;
+
+    for (let shift = 0; shift < radialSegments; shift++) {
+      let score = 0;
+      for (let j = 0; j < radialSegments; j++) {
+        score += prevRing[j].distanceToSquared(ring[(j + shift) % radialSegments]);
+      }
+      if (score < bestScore) {
+        bestScore = score;
+        bestShift = shift;
+      }
+    }
+
+    if (bestShift !== 0) {
+      rings[i] = ring.map((_, j) => ring[(j + bestShift) % radialSegments]);
+    }
+  }
+
+  for (let i = 0; i <= tubularSegments; i++) {
+    for (let j = 0; j < radialSegments; j++) {
+      const p = rings[i][j];
+      positions.push(p.x, p.y, p.z);
     }
   }
 
@@ -275,6 +332,7 @@ function createClosedTubeGeometry(curve, tubularSegments, radius, radialSegments
       indices.push(b, c, d);
     }
   }
+  const bodyIndexCount = indices.length;
 
   // Helper: compute ring center from actual vertex positions
   function getRingCenter(ringStartIdx) {
@@ -360,7 +418,9 @@ function createClosedTubeGeometry(curve, tubularSegments, radius, radialSegments
   if (startTangent.lengthSq() < 0.5) {
     startTangent.copy(curve.getTangentAt(0).normalize().negate());
   }
+  const startCapIndexStart = indices.length;
   buildHemisphereCap(0, startTangent, true);
+  const startCapIndexCount = indices.length - startCapIndexStart;
 
   // 4. End cap — tangent points outward from tube end, normal winding
   const endRingStart = tubularSegments * radialSegments;
@@ -370,20 +430,562 @@ function createClosedTubeGeometry(curve, tubularSegments, radius, radialSegments
   if (endTangent.lengthSq() < 0.5) {
     endTangent.copy(curve.getTangentAt(1).normalize());
   }
+  const endCapIndexStart = indices.length;
   buildHemisphereCap(endRingStart, endTangent, false);
+  const endCapIndexCount = indices.length - endCapIndexStart;
 
   const closedGeom = new THREE.BufferGeometry();
   closedGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   closedGeom.setIndex(indices);
   closedGeom.computeVertexNormals();
+  closedGeom.userData.seamDebug = {
+    radialSegments,
+    tubularSegments,
+    bodyIndexCount,
+    startCapIndexStart,
+    startCapIndexCount,
+    endCapIndexStart,
+    endCapIndexCount,
+  };
   return closedGeom;
+}
+
+function createClosedTubeGeometryTransport(curveOrCenters, tubularSegments, radius, radialSegments) {
+  const positions = [];
+  const indices = [];
+  const CAP_RINGS = 4;
+  const rings = [];
+  const centers = Array.isArray(curveOrCenters)
+    ? curveOrCenters.map((point) => point.clone())
+    : [];
+  const tangents = [];
+  const normals = [];
+  const binormals = [];
+  const quat = new THREE.Quaternion();
+
+  function choosePerpendicular(tangent) {
+    const axes = [
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(0, 1, 0),
+      new THREE.Vector3(0, 0, 1),
+    ];
+    axes.sort((a, b) => Math.abs(a.dot(tangent)) - Math.abs(b.dot(tangent)));
+
+    const normal = new THREE.Vector3().crossVectors(axes[0], tangent);
+    if (normal.lengthSq() < 1e-8) {
+      normal.crossVectors(axes[1], tangent);
+    }
+    return normal.normalize();
+  }
+
+  if (!Array.isArray(curveOrCenters)) {
+    for (let i = 0; i <= tubularSegments; i++) {
+      centers.push(curveOrCenters.getPointAt(i / tubularSegments));
+    }
+  }
+
+  tubularSegments = centers.length - 1;
+
+  for (let i = 0; i <= tubularSegments; i++) {
+    const tangent = new THREE.Vector3();
+    if (i === 0) {
+      tangent.subVectors(centers[Math.min(2, tubularSegments)], centers[0]);
+    } else if (i === tubularSegments) {
+      tangent.subVectors(centers[i], centers[Math.max(0, i - 2)]);
+    } else {
+      tangent.subVectors(centers[i + 1], centers[i - 1]);
+    }
+
+    if (tangent.lengthSq() < 1e-8) {
+      tangent.copy(i > 0 ? tangents[i - 1] : new THREE.Vector3(0, 0, 1));
+    }
+    tangents.push(tangent.normalize());
+  }
+
+  normals.push(choosePerpendicular(tangents[0]));
+  binormals.push(new THREE.Vector3().crossVectors(tangents[0], normals[0]).normalize());
+
+  for (let i = 1; i <= tubularSegments; i++) {
+    quat.setFromUnitVectors(tangents[i - 1], tangents[i]);
+
+    const normal = normals[i - 1].clone().applyQuaternion(quat);
+    normal.sub(tangents[i].clone().multiplyScalar(normal.dot(tangents[i])));
+    if (normal.lengthSq() < 1e-8) {
+      normal.copy(choosePerpendicular(tangents[i]));
+    } else {
+      normal.normalize();
+    }
+
+    const binormal = new THREE.Vector3().crossVectors(tangents[i], normal);
+    if (binormal.lengthSq() < 1e-8) {
+      normal.copy(choosePerpendicular(tangents[i]));
+      binormal.crossVectors(tangents[i], normal);
+    }
+
+    normals.push(normal);
+    binormals.push(binormal.normalize());
+  }
+
+  for (let i = 0; i <= tubularSegments; i++) {
+    const ring = [];
+    for (let j = 0; j < radialSegments; j++) {
+      const theta = (j / radialSegments) * Math.PI * 2;
+      const cosT = Math.cos(theta);
+      const sinT = Math.sin(theta);
+      ring.push(new THREE.Vector3(
+        centers[i].x + radius * (cosT * normals[i].x + sinT * binormals[i].x),
+        centers[i].y + radius * (cosT * normals[i].y + sinT * binormals[i].y),
+        centers[i].z + radius * (cosT * normals[i].z + sinT * binormals[i].z)
+      ));
+    }
+    rings.push(ring);
+  }
+
+  for (let i = 1; i <= tubularSegments; i++) {
+    const prevRing = rings[i - 1];
+    const ring = rings[i];
+    let bestShift = 0;
+    let bestScore = Infinity;
+
+    for (let shift = 0; shift < radialSegments; shift++) {
+      let score = 0;
+      for (let j = 0; j < radialSegments; j++) {
+        score += prevRing[j].distanceToSquared(ring[(j + shift) % radialSegments]);
+      }
+      if (score < bestScore) {
+        bestScore = score;
+        bestShift = shift;
+      }
+    }
+
+    if (bestShift !== 0) {
+      rings[i] = ring.map((_, j) => ring[(j + bestShift) % radialSegments]);
+    }
+  }
+
+  for (let i = 0; i <= tubularSegments; i++) {
+    for (let j = 0; j < radialSegments; j++) {
+      const p = rings[i][j];
+      positions.push(p.x, p.y, p.z);
+    }
+  }
+
+  for (let i = 0; i < tubularSegments; i++) {
+    for (let j = 0; j < radialSegments; j++) {
+      const a = i * radialSegments + j;
+      const b = i * radialSegments + (j + 1) % radialSegments;
+      const c = (i + 1) * radialSegments + (j + 1) % radialSegments;
+      const d = (i + 1) * radialSegments + j;
+
+      indices.push(a, b, d);
+      indices.push(b, c, d);
+    }
+  }
+  const bodyIndexCount = indices.length;
+
+  function getRingCenter(ringStartIdx) {
+    let cx = 0;
+    let cy = 0;
+    let cz = 0;
+    for (let j = 0; j < radialSegments; j++) {
+      const idx = (ringStartIdx + j) * 3;
+      cx += positions[idx];
+      cy += positions[idx + 1];
+      cz += positions[idx + 2];
+    }
+    return new THREE.Vector3(cx / radialSegments, cy / radialSegments, cz / radialSegments);
+  }
+
+  function buildHemisphereCap(ringStartIdx, tangent, flipWinding) {
+    const center = getRingCenter(ringStartIdx);
+    let prevRingStart = ringStartIdx;
+
+    for (let ring = 1; ring <= CAP_RINGS; ring++) {
+      const phi = (ring / CAP_RINGS) * (Math.PI / 2);
+      const cosP = Math.cos(phi);
+      const sinP = Math.sin(phi);
+
+      if (ring < CAP_RINGS) {
+        const currentRingStart = positions.length / 3;
+        for (let j = 0; j < radialSegments; j++) {
+          const origIdx = (ringStartIdx + j) * 3;
+          const dx = positions[origIdx] - center.x;
+          const dy = positions[origIdx + 1] - center.y;
+          const dz = positions[origIdx + 2] - center.z;
+
+          positions.push(
+            center.x + cosP * dx + sinP * radius * tangent.x,
+            center.y + cosP * dy + sinP * radius * tangent.y,
+            center.z + cosP * dz + sinP * radius * tangent.z
+          );
+        }
+
+        for (let j = 0; j < radialSegments; j++) {
+          const a = prevRingStart + j;
+          const b = prevRingStart + (j + 1) % radialSegments;
+          const c = currentRingStart + (j + 1) % radialSegments;
+          const d = currentRingStart + j;
+
+          if (flipWinding) {
+            indices.push(a, d, b);
+            indices.push(b, d, c);
+          } else {
+            indices.push(a, b, d);
+            indices.push(b, c, d);
+          }
+        }
+
+        prevRingStart = currentRingStart;
+      } else {
+        const poleIdx = positions.length / 3;
+        positions.push(
+          center.x + radius * tangent.x,
+          center.y + radius * tangent.y,
+          center.z + radius * tangent.z
+        );
+
+        for (let j = 0; j < radialSegments; j++) {
+          if (flipWinding) {
+            indices.push(prevRingStart + j, poleIdx, prevRingStart + (j + 1) % radialSegments);
+          } else {
+            indices.push(prevRingStart + (j + 1) % radialSegments, poleIdx, prevRingStart + j);
+          }
+        }
+      }
+    }
+  }
+
+  const startCapIndexStart = indices.length;
+  buildHemisphereCap(0, tangents[0].clone().negate(), true);
+  const startCapIndexCount = indices.length - startCapIndexStart;
+
+  const endRingStart = tubularSegments * radialSegments;
+  const endCapIndexStart = indices.length;
+  buildHemisphereCap(endRingStart, tangents[tubularSegments], false);
+  const endCapIndexCount = indices.length - endCapIndexStart;
+
+  const closedGeom = new THREE.BufferGeometry();
+  closedGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  closedGeom.setIndex(indices);
+  closedGeom.computeVertexNormals();
+  closedGeom.userData.seamDebug = {
+    radialSegments,
+    tubularSegments,
+    bodyIndexCount,
+    startCapIndexStart,
+    startCapIndexCount,
+    endCapIndexStart,
+    endCapIndexCount,
+  };
+  return closedGeom;
+}
+
+function trimPolylineEnds(points, trimDistance) {
+  if (!points || points.length < 2 || trimDistance <= 1e-6) {
+    return points.map((p) => p.clone());
+  }
+
+  const cleaned = [points[0].clone()];
+  for (let i = 1; i < points.length; i++) {
+    if (cleaned[cleaned.length - 1].distanceToSquared(points[i]) > 1e-8) {
+      cleaned.push(points[i].clone());
+    }
+  }
+
+  if (cleaned.length < 2) return cleaned;
+
+  const cumulative = [0];
+  for (let i = 1; i < cleaned.length; i++) {
+    cumulative.push(cumulative[i - 1] + cleaned[i].distanceTo(cleaned[i - 1]));
+  }
+
+  const totalLength = cumulative[cumulative.length - 1];
+  if (totalLength <= trimDistance * 2 + 1e-6) {
+    return cleaned;
+  }
+
+  function pointAt(distance) {
+    let segIndex = 0;
+    while (segIndex < cumulative.length - 2 && cumulative[segIndex + 1] < distance) {
+      segIndex++;
+    }
+
+    const start = cleaned[segIndex];
+    const end = cleaned[segIndex + 1];
+    const len0 = cumulative[segIndex];
+    const len1 = cumulative[segIndex + 1];
+    const span = Math.max(1e-8, len1 - len0);
+    const t = THREE.MathUtils.clamp((distance - len0) / span, 0, 1);
+    return start.clone().lerp(end, t);
+  }
+
+  const startDistance = trimDistance;
+  const endDistance = totalLength - trimDistance;
+  const trimmed = [pointAt(startDistance)];
+
+  for (let i = 1; i < cleaned.length - 1; i++) {
+    if (cumulative[i] > startDistance && cumulative[i] < endDistance) {
+      trimmed.push(cleaned[i].clone());
+    }
+  }
+
+  trimmed.push(pointAt(endDistance));
+  return trimmed;
+}
+
+function resamplePolylineEquidistant(points, segmentCount) {
+  if (!points || points.length < 2 || segmentCount < 1) {
+    return points ? points.map((point) => point.clone()) : [];
+  }
+
+  const cleaned = [points[0].clone()];
+  for (let i = 1; i < points.length; i++) {
+    if (cleaned[cleaned.length - 1].distanceToSquared(points[i]) > 1e-8) {
+      cleaned.push(points[i].clone());
+    }
+  }
+
+  if (cleaned.length < 2) return cleaned;
+
+  const cumulative = [0];
+  for (let i = 1; i < cleaned.length; i++) {
+    cumulative.push(cumulative[i - 1] + cleaned[i].distanceTo(cleaned[i - 1]));
+  }
+
+  const totalLength = cumulative[cumulative.length - 1];
+  if (totalLength <= 1e-8) {
+    return [cleaned[0].clone(), cleaned[cleaned.length - 1].clone()];
+  }
+
+  const result = [];
+  let segIndex = 0;
+
+  for (let i = 0; i <= segmentCount; i++) {
+    const target = (totalLength * i) / segmentCount;
+    while (segIndex < cumulative.length - 2 && cumulative[segIndex + 1] < target) {
+      segIndex++;
+    }
+
+    const start = cleaned[segIndex];
+    const end = cleaned[segIndex + 1];
+    const len0 = cumulative[segIndex];
+    const len1 = cumulative[segIndex + 1];
+    const span = Math.max(1e-8, len1 - len0);
+    const t = THREE.MathUtils.clamp((target - len0) / span, 0, 1);
+    result.push(start.clone().lerp(end, t));
+  }
+
+  return result;
+}
+
+function stabilizeTubeCenters(centers, radius, cleanup = { start: true, end: true }) {
+  const cleaned = centers.map((point) => point.clone());
+  if (cleaned.length < 4) return cleaned;
+
+  const minEndSpan = radius * 0.6;
+  const turnLimitDeg = 135;
+  const maxDropsPerSide = 6;
+  const minRemainingPoints = 4;
+  const minRemainingLength = radius * 4.5;
+
+  function segmentLength(points, i0, i1) {
+    if (i0 < 0 || i1 >= points.length) return 0;
+    return points[i1].distanceTo(points[i0]);
+  }
+
+  function segmentTurnDeg(points, a, b, c) {
+    if (a < 0 || c >= points.length) return 0;
+    const v0 = points[b].clone().sub(points[a]);
+    const v1 = points[c].clone().sub(points[b]);
+    if (v0.lengthSq() < 1e-8 || v1.lengthSq() < 1e-8) return 0;
+    return THREE.MathUtils.radToDeg(v0.angleTo(v1));
+  }
+
+  function polylineLength(points) {
+    let total = 0;
+    for (let i = 1; i < points.length; i++) {
+      total += points[i].distanceTo(points[i - 1]);
+    }
+    return total;
+  }
+
+  function shouldDropStart(points) {
+    if (points.length < 4) return false;
+    const firstLen = segmentLength(points, 0, 1);
+    const secondLen = segmentLength(points, 1, 2);
+    const startTurn = segmentTurnDeg(points, 0, 1, 2);
+    return (
+      firstLen < minEndSpan ||
+      (firstLen < radius && secondLen < radius) ||
+      (firstLen < radius * 1.25 && startTurn > turnLimitDeg)
+    );
+  }
+
+  if (cleanup.start) {
+    let startDrops = 0;
+    while (
+      startDrops < maxDropsPerSide &&
+      shouldDropStart(cleaned) &&
+      cleaned.length > minRemainingPoints &&
+      polylineLength(cleaned) > minRemainingLength
+    ) {
+      cleaned.shift();
+      startDrops++;
+    }
+  }
+
+  if (cleanup.end) {
+    cleaned.reverse();
+    let endDrops = 0;
+    while (
+      endDrops < maxDropsPerSide &&
+      shouldDropStart(cleaned) &&
+      cleaned.length > minRemainingPoints &&
+      polylineLength(cleaned) > minRemainingLength
+    ) {
+      cleaned.shift();
+      endDrops++;
+    }
+    cleaned.reverse();
+  }
+
+  if (cleaned.length < 2) {
+    return centers.map((point) => point.clone());
+  }
+
+  return cleaned;
+}
+
+function analyzeTriangleRange(geometry, indexStart, indexCount) {
+  const index = geometry.getIndex();
+  const position = geometry.getAttribute('position');
+  if (!index || !position || indexCount <= 0) {
+    return { triangleCount: 0, minQuality: 1, maxAspect: 1, degenerateCount: 0 };
+  }
+
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const ab = new THREE.Vector3();
+  const ac = new THREE.Vector3();
+  const bc = new THREE.Vector3();
+  const cross = new THREE.Vector3();
+  let minQuality = 1;
+  let maxAspect = 1;
+  let degenerateCount = 0;
+  let triangleCount = 0;
+
+  for (let i = indexStart; i < indexStart + indexCount; i += 3) {
+    a.fromBufferAttribute(position, index.getX(i));
+    b.fromBufferAttribute(position, index.getX(i + 1));
+    c.fromBufferAttribute(position, index.getX(i + 2));
+
+    ab.subVectors(b, a);
+    ac.subVectors(c, a);
+    bc.subVectors(c, b);
+
+    const e0 = ab.length();
+    const e1 = ac.length();
+    const e2 = bc.length();
+    const minEdge = Math.max(1e-8, Math.min(e0, e1, e2));
+    const maxEdge = Math.max(e0, e1, e2);
+    const area2 = cross.crossVectors(ab, ac).length();
+    const quality = area2 / Math.max(1e-8, maxEdge * maxEdge);
+    const aspect = maxEdge / minEdge;
+
+    minQuality = Math.min(minQuality, quality);
+    maxAspect = Math.max(maxAspect, aspect);
+    if (quality < 1e-3 || aspect > 25) degenerateCount++;
+    triangleCount++;
+  }
+
+  return { triangleCount, minQuality, maxAspect, degenerateCount };
+}
+
+function analyzeTubeSeams(geometry) {
+  const seamDebug = geometry.userData?.seamDebug;
+  if (!seamDebug) return null;
+
+  const stripIndexCount = seamDebug.radialSegments * 6;
+  const startBody = analyzeTriangleRange(geometry, 0, stripIndexCount);
+  const endBody = analyzeTriangleRange(
+    geometry,
+    Math.max(0, seamDebug.bodyIndexCount - stripIndexCount),
+    Math.min(stripIndexCount, seamDebug.bodyIndexCount)
+  );
+  const startCap = analyzeTriangleRange(geometry, seamDebug.startCapIndexStart, seamDebug.startCapIndexCount);
+  const endCap = analyzeTriangleRange(geometry, seamDebug.endCapIndexStart, seamDebug.endCapIndexCount);
+
+  return {
+    worstQuality: Math.min(startBody.minQuality, endBody.minQuality, startCap.minQuality, endCap.minQuality),
+    worstAspect: Math.max(startBody.maxAspect, endBody.maxAspect, startCap.maxAspect, endCap.maxAspect),
+    badTriangles:
+      startBody.degenerateCount +
+      endBody.degenerateCount +
+      startCap.degenerateCount +
+      endCap.degenerateCount,
+    startBody,
+    endBody,
+    startCap,
+    endCap,
+  };
+}
+
+function analyzeCenterline(points, radius) {
+  if (!points || points.length < 2) {
+    return {
+      pointCount: points ? points.length : 0,
+      firstLen: 0,
+      secondLen: 0,
+      penultLen: 0,
+      lastLen: 0,
+      minLen: 0,
+      startTurn: 0,
+      endTurn: 0,
+      firstLenR: 0,
+      lastLenR: 0,
+    };
+  }
+
+  const lengths = [];
+  for (let i = 1; i < points.length; i++) {
+    lengths.push(points[i].distanceTo(points[i - 1]));
+  }
+
+  function segmentAngle(a0, a1, a2) {
+    if (a2 >= points.length) return 0;
+    const v0 = points[a1].clone().sub(points[a0]);
+    const v1 = points[a2].clone().sub(points[a1]);
+    if (v0.lengthSq() < 1e-8 || v1.lengthSq() < 1e-8) return 0;
+    return THREE.MathUtils.radToDeg(v0.angleTo(v1));
+  }
+
+  const firstLen = lengths[0] ?? 0;
+  const secondLen = lengths[1] ?? 0;
+  const penultLen = lengths[Math.max(0, lengths.length - 2)] ?? 0;
+  const lastLen = lengths[lengths.length - 1] ?? 0;
+  const minLen = lengths.reduce((min, len) => Math.min(min, len), Infinity);
+
+  return {
+    pointCount: points.length,
+    firstLen,
+    secondLen,
+    penultLen,
+    lastLen,
+    minLen: Number.isFinite(minLen) ? minLen : 0,
+    startTurn: segmentAngle(0, 1, 2),
+    endTurn: segmentAngle(points.length - 3, points.length - 2, points.length - 1),
+    firstLenR: radius > 1e-8 ? firstLen / radius : 0,
+    lastLenR: radius > 1e-8 ? lastLen / radius : 0,
+  };
 }
 
 function buildTubeGeometries(lines, canvasW, canvasH, shellFunc, extrusionParam) {
   const tubeGeometries = [];
   const sphereGeometries = []; // kept empty for API compat
   
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex];
     if (line.length < 2) continue;
     const points = [];
     let totalRadius = 0;
@@ -401,10 +1003,32 @@ function buildTubeGeometries(lines, canvasW, canvasH, shellFunc, extrusionParam)
     if (points.length < 2) continue;
     
     const avgRadius = (totalRadius / points.length) * 0.5;
-    
     const curve = new THREE.CatmullRomCurve3(points, false, 'chordal');
     const segments = Math.min(20, Math.max(4, Math.floor(points.length * 0.3)));
-    const closedGeom = createClosedTubeGeometry(curve, segments, avgRadius, 6);
+    const sampledCenters = Array.from({ length: segments + 1 }, (_, i) => curve.getPointAt(i / segments));
+    const probeGeom = createClosedTubeGeometryTransport(sampledCenters, sampledCenters.length - 1, avgRadius, 6);
+    const probeSeams = analyzeTubeSeams(probeGeom);
+    probeGeom.dispose();
+    const cleanup = {
+      start: Boolean(probeSeams) && (
+        probeSeams.startBody.minQuality < 0.08 ||
+        probeSeams.startBody.maxAspect > 25 ||
+        probeSeams.startBody.degenerateCount > 0
+      ),
+      end: Boolean(probeSeams) && (
+        probeSeams.endBody.minQuality < 0.08 ||
+        probeSeams.endBody.maxAspect > 25 ||
+        probeSeams.endBody.degenerateCount > 0
+      ),
+    };
+    const stableCenters = stabilizeTubeCenters(sampledCenters, avgRadius, cleanup);
+    if (stableCenters.length < 2) continue;
+    const finalCenters = resamplePolylineEquidistant(stableCenters, segments);
+    if (finalCenters.length < 2) continue;
+
+    const closedGeom = createClosedTubeGeometryTransport(finalCenters, finalCenters.length - 1, avgRadius, 6);
+    closedGeom.userData.lineIndex = lineIndex;
+    closedGeom.userData.centerlineDebug = analyzeCenterline(finalCenters, avgRadius);
     tubeGeometries.push(closedGeom);
   }
   return { tubeGeometries, sphereGeometries };
@@ -457,7 +1081,8 @@ function buildTubeGeometriesFromMesh(lines, canvasW, canvasH, geometry, extrusio
 
   const tubeGeometries = [];
   const sphereGeometries = []; // kept empty for API compat
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex];
     if (line.length < 2) continue;
     const points = [];
     let totalRadius = 0;
@@ -492,7 +1117,30 @@ function buildTubeGeometriesFromMesh(lines, canvasW, canvasH, geometry, extrusio
     const avgRadius = (totalRadius / points.length) * 0.5;
     const curve = new THREE.CatmullRomCurve3(points, false, 'chordal');
     const segments = Math.min(20, Math.max(4, Math.floor(points.length * 0.3)));
-    const closedGeom = createClosedTubeGeometry(curve, segments, avgRadius, 6);
+    const sampledCenters = Array.from({ length: segments + 1 }, (_, i) => curve.getPointAt(i / segments));
+    const probeGeom = createClosedTubeGeometryTransport(sampledCenters, sampledCenters.length - 1, avgRadius, 6);
+    const probeSeams = analyzeTubeSeams(probeGeom);
+    probeGeom.dispose();
+    const cleanup = {
+      start: Boolean(probeSeams) && (
+        probeSeams.startBody.minQuality < 0.08 ||
+        probeSeams.startBody.maxAspect > 25 ||
+        probeSeams.startBody.degenerateCount > 0
+      ),
+      end: Boolean(probeSeams) && (
+        probeSeams.endBody.minQuality < 0.08 ||
+        probeSeams.endBody.maxAspect > 25 ||
+        probeSeams.endBody.degenerateCount > 0
+      ),
+    };
+    const stableCenters = stabilizeTubeCenters(sampledCenters, avgRadius, cleanup);
+    if (stableCenters.length < 2) continue;
+    const finalCenters = resamplePolylineEquidistant(stableCenters, segments);
+    if (finalCenters.length < 2) continue;
+
+    const closedGeom = createClosedTubeGeometryTransport(finalCenters, finalCenters.length - 1, avgRadius, 6);
+    closedGeom.userData.lineIndex = lineIndex;
+    closedGeom.userData.centerlineDebug = analyzeCenterline(finalCenters, avgRadius);
     tubeGeometries.push(closedGeom);
   }
   return { tubeGeometries, sphereGeometries };
@@ -770,6 +1418,44 @@ function buildSinglePavilion(p) {
       const allTubeGeomsForPreview = tubeGeometries.slice();
       tubeGeometries = []; // Clear tube geometries so we bypass CSG union for previews
       sphereGeometries = [];
+      const seamReport = allTubeGeomsForPreview
+        .map((tubeGeom, previewIndex) => {
+          const analysis = analyzeTubeSeams(tubeGeom);
+          const centerline = tubeGeom.userData?.centerlineDebug;
+          if (!analysis) return null;
+          return {
+            previewIndex,
+            lineIndex: tubeGeom.userData?.lineIndex ?? -1,
+            badTriangles: analysis.badTriangles,
+            worstQuality: Number(analysis.worstQuality.toFixed(6)),
+            worstAspect: Number(analysis.worstAspect.toFixed(3)),
+            startBodyQ: Number(analysis.startBody.minQuality.toFixed(6)),
+            startCapQ: Number(analysis.startCap.minQuality.toFixed(6)),
+            endBodyQ: Number(analysis.endBody.minQuality.toFixed(6)),
+            endCapQ: Number(analysis.endCap.minQuality.toFixed(6)),
+            firstLen: Number((centerline?.firstLen ?? 0).toFixed(4)),
+            secondLen: Number((centerline?.secondLen ?? 0).toFixed(4)),
+            lastLen: Number((centerline?.lastLen ?? 0).toFixed(4)),
+            penultLen: Number((centerline?.penultLen ?? 0).toFixed(4)),
+            firstLenR: Number((centerline?.firstLenR ?? 0).toFixed(3)),
+            lastLenR: Number((centerline?.lastLenR ?? 0).toFixed(3)),
+            startTurn: Number((centerline?.startTurn ?? 0).toFixed(2)),
+            endTurn: Number((centerline?.endTurn ?? 0).toFixed(2)),
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => {
+          if (b.badTriangles !== a.badTriangles) return b.badTriangles - a.badTriangles;
+          if (a.worstQuality !== b.worstQuality) return a.worstQuality - b.worstQuality;
+          return b.worstAspect - a.worstAspect;
+        })
+        .slice(0, 12);
+
+      if (seamReport.length > 0) {
+        console.groupCollapsed('[Preview] Worst tube seam metrics');
+        console.table(seamReport);
+        console.groupEnd();
+      }
       
       if (p.previewSolidCheck) {
         // Per-tube solid check mode: each tube gets its own mesh with green/red color

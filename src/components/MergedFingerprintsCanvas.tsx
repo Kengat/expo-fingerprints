@@ -82,6 +82,7 @@ function isInsideFingerprint(px: number, py: number, item: CanvasItem, cullingOf
 export const UV_SIZE = 2048;
 
 export type DotCircle = { x: number; y: number; r: number };
+type VisibleDotPoint = { x: number; y: number; gx: number; gy: number };
 
 export type EdgeDistanceField = {
     field: Float32Array;
@@ -196,6 +197,101 @@ function isNearGeometryEdge(distField: EdgeDistanceField, worldX: number, worldY
     if (!distField) return false;
     const dist = sampleEdgeDistance(distField, worldX, worldY);
     return dist < dotRadius + edgeCullRadius;
+}
+
+function collectVisibleDotSegments(
+    line: Point[],
+    transformPoint: (lx: number, ly: number) => { x: number; y: number },
+    isCulled: (gx: number, gy: number, customOffset?: number) => boolean,
+    getLineThickness: (lx: number, ly: number) => number,
+    itemScale: number,
+    edgeDistField: EdgeDistanceField,
+    edgeCullRadius: number,
+): VisibleDotPoint[][] {
+    const segments: VisibleDotPoint[][] = [];
+    let currentSegment: VisibleDotPoint[] = [];
+
+    for (let i = 0; i < line.length; i++) {
+        const p = line[i];
+        const globalP = transformPoint(p.x, p.y);
+        const lw = getLineThickness(p.x, p.y) * itemScale;
+        const halfLw = lw / 2;
+        const culled =
+            isCulled(globalP.x, globalP.y) ||
+            isNearGeometryEdge(edgeDistField, globalP.x, globalP.y, halfLw, edgeCullRadius);
+
+        if (!culled) {
+            currentSegment.push({ x: p.x, y: p.y, gx: globalP.x, gy: globalP.y });
+        } else {
+            if (currentSegment.length > 1) {
+                segments.push(currentSegment);
+            }
+            currentSegment = [];
+        }
+    }
+
+    if (currentSegment.length > 1) {
+        segments.push(currentSegment);
+    }
+
+    return segments;
+}
+
+function forEachDotPlacement(
+    segment: VisibleDotPoint[],
+    spacing: number,
+    callback: (dot: { x: number; y: number; gx: number; gy: number; distAlong: number; segmentLength: number }) => void,
+) {
+    if (segment.length < 2 || spacing <= 1e-8) return;
+
+    const segmentLength = segment.reduce((sum, point, index) => {
+        if (index === 0) return 0;
+        const prev = segment[index - 1];
+        return sum + Math.hypot(point.x - prev.x, point.y - prev.y);
+    }, 0);
+
+    let distUntilNextDot = spacing / 2;
+    let distAtSegmentStart = 0;
+
+    for (let i = 1; i < segment.length; i++) {
+        const p1 = segment[i - 1];
+        const p2 = segment[i];
+        const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        if (d <= 1e-8) continue;
+
+        while (distUntilNextDot <= d + 1e-8) {
+            const t = Math.max(0, Math.min(1, distUntilNextDot / d));
+            callback({
+                x: p1.x + (p2.x - p1.x) * t,
+                y: p1.y + (p2.y - p1.y) * t,
+                gx: p1.gx + (p2.gx - p1.gx) * t,
+                gy: p1.gy + (p2.gy - p1.gy) * t,
+                distAlong: distAtSegmentStart + distUntilNextDot,
+                segmentLength,
+            });
+            distUntilNextDot += spacing;
+        }
+
+        distAtSegmentStart += d;
+        distUntilNextDot -= d;
+    }
+}
+
+function isNearVisibleSegmentEndpoint(
+    segment: VisibleDotPoint[],
+    dotGX: number,
+    dotGY: number,
+    forbiddenRadius: number,
+): boolean {
+    if (segment.length < 2) return false;
+    const start = segment[0];
+    const end = segment[segment.length - 1];
+    const startDx = dotGX - start.gx;
+    const startDy = dotGY - start.gy;
+    const endDx = dotGX - end.gx;
+    const endDy = dotGY - end.gy;
+    const r2 = forbiddenRadius * forbiddenRadius;
+    return (startDx * startDx + startDy * startDy) <= r2 || (endDx * endDx + endDy * endDy) <= r2;
 }
 
 // Compute a view that fits all items into the given canvas dimensions
@@ -456,26 +552,33 @@ export function renderFingerprints(
         const scaledDotSpacing = dotSpacing / item.scale;
 
         for (const line of lines) {
-            let distSinceLastDot = scaledDotSpacing / 2;
-            for (let i = 1; i < line.length; i++) {
-                const p1 = line[i - 1];
-                const p2 = line[i];
-                const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-                distSinceLastDot += d;
-                if (distSinceLastDot >= scaledDotSpacing) {
-                    distSinceLastDot -= scaledDotSpacing;
+            const visibleSegments = collectVisibleDotSegments(
+                line,
+                transformPoint,
+                isCulled,
+                getLineThickness,
+                item.scale,
+                edgeDistField,
+                edgeCullRadius
+            );
 
-                    const globalP2 = transformPoint(p2.x, p2.y);
-                    const baseRadius = getSize(p2.x, p2.y) * item.scale;
+            for (const segment of visibleSegments) {
+                forEachDotPlacement(segment, scaledDotSpacing, ({ x: dotX, y: dotY, gx: dotGX, gy: dotGY }) => {
+                    const baseRadius = getSize(dotX, dotY) * item.scale;
+                    const lineRadius = (getLineThickness(dotX, dotY) * item.scale) / 2;
+                    const endpointRadius = lineRadius + baseRadius * 0.1;
+                    if (isNearVisibleSegmentEndpoint(segment, dotGX, dotGY, endpointRadius)) {
+                        return;
+                    }
+
                     const bleedMargin = baseRadius / 256;
-                    if (!isCulled(globalP2.x, globalP2.y, cullingOffset - bleedMargin) &&
-                        !isNearGeometryEdge(edgeDistField, globalP2.x, globalP2.y, baseRadius, edgeCullRadius)) {
-                        const radius = baseRadius;
+                    if (!isCulled(dotGX, dotGY, cullingOffset - bleedMargin) &&
+                        !isNearGeometryEdge(edgeDistField, dotGX, dotGY, baseRadius, edgeCullRadius)) {
                         ctx.beginPath();
-                        ctx.arc(globalP2.x, globalP2.y, radius, 0, Math.PI * 2);
+                        ctx.arc(dotGX, dotGY, baseRadius, 0, Math.PI * 2);
                         ctx.fill();
                     }
-                }
+                });
             }
         }
 
@@ -607,6 +710,8 @@ export function collectDotCircles(
         const dotSpacing = item.params.dotSpacing ?? 18;
         const dotSizeMin = item.params.dotSizeMin ?? 1.5;
         const dotSizeMax = item.params.dotSizeMax ?? 6.0;
+        const lineThicknessMin = item.params.lineThicknessMin ?? 3;
+        const lineThicknessMax = item.params.lineThicknessMax ?? 3;
 
         function getSize(lx: number, ly: number) {
             const scaledMin = dotSizeMin / item.scale;
@@ -620,29 +725,51 @@ export function collectDotCircles(
             return scaledMin + v * (scaledMax - scaledMin);
         }
 
+        function getLineThickness(lx: number, ly: number) {
+            const scaledMin = lineThicknessMin / item.scale;
+            const scaledMax = lineThicknessMax / item.scale;
+            if (scaledMin === scaledMax) return scaledMin;
+            const nxl = (lx / 512) * 2 - 1;
+            const nyl = -((ly / 512) * 2 - 1);
+            let v = 0;
+            v += Math.sin(nxl * noiseScale + item.params.seed + 10) * Math.cos(nyl * noiseScale + item.params.seed + 10);
+            v += 0.5 * Math.sin(nxl * (noiseScale * 2) - item.params.seed + 10) * Math.cos(nyl * (noiseScale * 2) + item.params.seed + 10);
+            v = (v + 1.5) / 3;
+            return scaledMin + v * (scaledMax - scaledMin);
+        }
+
         const scaledDotSpacing = dotSpacing / item.scale;
 
         for (const line of lines) {
-            let distSinceLastDot = scaledDotSpacing / 2;
-            for (let i = 1; i < line.length; i++) {
-                const p1 = line[i - 1];
-                const p2 = line[i];
-                const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-                distSinceLastDot += d;
-                if (distSinceLastDot >= scaledDotSpacing) {
-                    distSinceLastDot -= scaledDotSpacing;
-                    const globalP2 = transformPoint(p2.x, p2.y);
-                    const baseRadius = getSize(p2.x, p2.y) * item.scale;
+            const visibleSegments = collectVisibleDotSegments(
+                line,
+                transformPoint,
+                isCulled,
+                getLineThickness,
+                item.scale,
+                edgeDistField,
+                edgeCullRadius
+            );
+
+            for (const segment of visibleSegments) {
+                forEachDotPlacement(segment, scaledDotSpacing, ({ x: dotX, y: dotY, gx: dotGX, gy: dotGY }) => {
+                    const baseRadius = getSize(dotX, dotY) * item.scale;
+                    const lineRadius = (getLineThickness(dotX, dotY) * item.scale) / 2;
+                    const endpointRadius = lineRadius + baseRadius * 0.1;
+                    if (isNearVisibleSegmentEndpoint(segment, dotGX, dotGY, endpointRadius)) {
+                        return;
+                    }
+
                     const bleedMargin = baseRadius / 256;
-                    if (!isCulled(globalP2.x, globalP2.y, cullingOffset - bleedMargin) &&
-                        !isNearGeometryEdge(edgeDistField, globalP2.x, globalP2.y, baseRadius, edgeCullRadius)) {
+                    if (!isCulled(dotGX, dotGY, cullingOffset - bleedMargin) &&
+                        !isNearGeometryEdge(edgeDistField, dotGX, dotGY, baseRadius, edgeCullRadius)) {
                         circles.push({
-                            x: globalP2.x * view.zoom + view.x,
-                            y: globalP2.y * view.zoom + view.y,
+                            x: dotGX * view.zoom + view.x,
+                            y: dotGY * view.zoom + view.y,
                             r: baseRadius * view.zoom,
                         });
                     }
-                }
+                });
             }
         }
     }
@@ -1051,29 +1178,38 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
                     // 2. Draw Dots
                     const scaledDotSpacing = dotSpacing / item.scale;
                     for (const line of lines) {
-                        let distSinceLastDot = scaledDotSpacing / 2;
-                        for (let i = 1; i < line.length; i++) {
-                            const p1 = line[i - 1];
-                            const p2 = line[i];
-                            const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-                            distSinceLastDot += d;
-                            if (distSinceLastDot >= scaledDotSpacing) {
-                                distSinceLastDot -= scaledDotSpacing;
+                        const visibleSegments = collectVisibleDotSegments(
+                            line,
+                            transformPoint,
+                            (gx, gy, customOffset) => isCulled(
+                                gx * view.zoom + view.x,
+                                gy * view.zoom + view.y,
+                                customOffset
+                            ),
+                            getLineThickness,
+                            item.scale,
+                            edgeDistField,
+                            edgeCullRadius
+                        );
 
-                                const globalP2 = transformPoint(p2.x, p2.y);
-                                const v2x = globalP2.x * view.zoom + view.x;
-                                const v2y = globalP2.y * view.zoom + view.y;
+                        for (const segment of visibleSegments) {
+                            forEachDotPlacement(segment, scaledDotSpacing, ({ x: dotX, y: dotY, gx: dotGX, gy: dotGY }) => {
+                                const baseRadius = getSize(dotX, dotY) * item.scale;
+                                const lineRadius = (getLineThickness(dotX, dotY) * item.scale) / 2;
+                                const endpointRadius = lineRadius + baseRadius * 0.1;
+                                if (isNearVisibleSegmentEndpoint(segment, dotGX, dotGY, endpointRadius)) {
+                                    return;
+                                }
 
-                                const baseRadius = getSize(p2.x, p2.y) * item.scale;
+                                const v2x = dotGX * view.zoom + view.x;
+                                const v2y = dotGY * view.zoom + view.y;
                                 const radius = baseRadius * view.zoom;
-
-                                // Use a slightly tighter culling offset to prevent dots from bleeding over the edge
                                 const bleedMargin = baseRadius / 256;
                                 if (!isCulled(v2x, v2y, cullingOffset - bleedMargin) &&
-                                    !isNearGeometryEdge(edgeDistField, globalP2.x, globalP2.y, baseRadius, edgeCullRadius)) {
+                                    !isNearGeometryEdge(edgeDistField, dotGX, dotGY, baseRadius, edgeCullRadius)) {
                                     svgContent += `  <circle cx="${v2x.toFixed(2)}" cy="${v2y.toFixed(2)}" r="${radius.toFixed(2)}" fill="#111111" />\n`;
                                 }
-                            }
+                            });
                         }
                     }
                 }
