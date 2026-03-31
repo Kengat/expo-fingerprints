@@ -35,6 +35,8 @@ const DRILL_SEGMENTS = 8;
 const MIN_WORLD_RADIUS = 0.02;
 const MAX_WORLD_RADIUS = 2.0;
 const MIN_CIRCLE_DISTANCE_SQ = 0.001;
+const MIN_TUBE_SEGMENTS = 4;
+const MAX_TUBE_SEGMENTS = 40;
 
 function deduplicateCircles(circles) {
   const result = [];
@@ -84,6 +86,67 @@ function estimateWorldRadius(shellFunc, u, v, radiusUV) {
   const distV = base.distanceTo(sampleV);
 
   return Math.max(MIN_WORLD_RADIUS, Math.min(MAX_WORLD_RADIUS, (distU + distV) / 2));
+}
+
+function measurePolylineLength2D(points) {
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    const dx = points[i].x - points[i - 1].x;
+    const dy = points[i].y - points[i - 1].y;
+    total += Math.hypot(dx, dy);
+  }
+  return total;
+}
+
+function measurePolylineCurviness2D(points) {
+  if (!points || points.length < 3) {
+    return { straightness: 1, turniness: 0 };
+  }
+
+  const lineLength = measurePolylineLength2D(points);
+  if (lineLength <= 1e-6) {
+    return { straightness: 1, turniness: 0 };
+  }
+
+  const start = points[0];
+  const end = points[points.length - 1];
+  const directDistance = Math.hypot(end.x - start.x, end.y - start.y);
+  const straightness = THREE.MathUtils.clamp(directDistance / lineLength, 0, 1);
+
+  let totalTurn = 0;
+  for (let i = 1; i < points.length - 1; i++) {
+    const ax = points[i].x - points[i - 1].x;
+    const ay = points[i].y - points[i - 1].y;
+    const bx = points[i + 1].x - points[i].x;
+    const by = points[i + 1].y - points[i].y;
+    const lenA = Math.hypot(ax, ay);
+    const lenB = Math.hypot(bx, by);
+
+    if (lenA <= 1e-6 || lenB <= 1e-6) continue;
+
+    const dot = THREE.MathUtils.clamp((ax * bx + ay * by) / (lenA * lenB), -1, 1);
+    totalTurn += Math.acos(dot);
+  }
+
+  return {
+    straightness,
+    turniness: totalTurn,
+  };
+}
+
+function getAdaptiveTubeSegmentCount(line2D, canvasW, canvasH) {
+  if (!line2D || line2D.length < 2) return MIN_TUBE_SEGMENTS;
+
+  const lineLength = measurePolylineLength2D(line2D);
+  const maxCanvasSpan = Math.max(canvasW, canvasH, 1);
+  const targetSegmentLength = maxCanvasSpan / MAX_TUBE_SEGMENTS;
+  const lengthBasedSegments = lineLength / Math.max(targetSegmentLength, 1e-6);
+  const { straightness, turniness } = measurePolylineCurviness2D(line2D);
+  const windingScore = THREE.MathUtils.clamp((1 - straightness) * 0.85 + (turniness / (Math.PI * 1.5)) * 0.75, 0, 1);
+  const detailFactor = THREE.MathUtils.lerp(0.65, 1.6, windingScore);
+  const segmentCount = Math.round(lengthBasedSegments * detailFactor);
+
+  return THREE.MathUtils.clamp(segmentCount, MIN_TUBE_SEGMENTS, MAX_TUBE_SEGMENTS);
 }
 
 function buildDrillGeometries(circles, canvasW, canvasH, shellFunc, thickness = 0) {
@@ -988,12 +1051,14 @@ function buildTubeGeometries(lines, canvasW, canvasH, shellFunc, extrusionParam)
     const line = lines[lineIndex];
     if (line.length < 2) continue;
     const points = [];
+    const filteredLine2D = [];
     let totalRadius = 0;
     
     for (const point of line) {
       const u = point.x / canvasW;
       const v = 1.0 - (point.y / canvasH);
       if (u < 0.005 || u > 0.995 || v < 0.005 || v > 0.995) continue;
+      filteredLine2D.push(point);
       const { pt } = computeSurfacePointAndNormal(shellFunc, u, v);
       points.push(pt);
       const radiusUV = point.thickness / Math.max(canvasW, canvasH);
@@ -1004,7 +1069,7 @@ function buildTubeGeometries(lines, canvasW, canvasH, shellFunc, extrusionParam)
     
     const avgRadius = (totalRadius / points.length) * 0.5;
     const curve = new THREE.CatmullRomCurve3(points, false, 'chordal');
-    const segments = Math.min(20, Math.max(4, Math.floor(points.length * 0.3)));
+    const segments = getAdaptiveTubeSegmentCount(filteredLine2D, canvasW, canvasH);
     const sampledCenters = Array.from({ length: segments + 1 }, (_, i) => curve.getPointAt(i / segments));
     const probeGeom = createClosedTubeGeometryTransport(sampledCenters, sampledCenters.length - 1, avgRadius, 6);
     const probeSeams = analyzeTubeSeams(probeGeom);
@@ -1085,12 +1150,14 @@ function buildTubeGeometriesFromMesh(lines, canvasW, canvasH, geometry, extrusio
     const line = lines[lineIndex];
     if (line.length < 2) continue;
     const points = [];
+    const filteredLine2D = [];
     let totalRadius = 0;
     
     for (const point of line) {
       const cu = point.x / canvasW;
       const cv = 1.0 - (point.y / canvasH);
       if (cu < 0.005 || cu > 0.995 || cv < 0.005 || cv > 0.995) continue;
+      filteredLine2D.push(point);
 
       let foundPt = null;
       for (const tri of triData) {
@@ -1116,7 +1183,7 @@ function buildTubeGeometriesFromMesh(lines, canvasW, canvasH, geometry, extrusio
     
     const avgRadius = (totalRadius / points.length) * 0.5;
     const curve = new THREE.CatmullRomCurve3(points, false, 'chordal');
-    const segments = Math.min(20, Math.max(4, Math.floor(points.length * 0.3)));
+    const segments = getAdaptiveTubeSegmentCount(filteredLine2D, canvasW, canvasH);
     const sampledCenters = Array.from({ length: segments + 1 }, (_, i) => curve.getPointAt(i / segments));
     const probeGeom = createClosedTubeGeometryTransport(sampledCenters, sampledCenters.length - 1, avgRadius, 6);
     const probeSeams = analyzeTubeSeams(probeGeom);
