@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { FingerprintGenerator, Point } from './FingerprintGenerator';
 import { RotateCw, Plus, Trash2, Save, FolderOpen, RotateCcw } from 'lucide-react';
-import { DEFAULT_PARAMS, DEFAULT_DOTS_PARAMS, PRESETS, FingerprintParams } from '../presets';
+import { DEFAULT_PARAMS, DEFAULT_DOTS_PARAMS, PRESETS, FingerprintParams, GLOBAL_SCALE_MAX, LINE_THICKNESS_SCALE_MIN, LINE_THICKNESS_SCALE_MAX } from '../presets';
 import { MergedFingerprintsCanvas, UV_SIZE, getComputedItems } from './MergedFingerprintsCanvas';
 import type { CanvasItem, EdgeDistanceField } from './MergedFingerprintsCanvas';
 export type { CanvasItem };
@@ -95,6 +95,7 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
             dotSizeMin: 2.4,
             dotSizeMax: 4.2,
             lineDensity: 14,
+            lineThicknessScale: 1.0,
             noiseScale: 7,
             globalScale: 1.0,
         };
@@ -163,6 +164,7 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
             dotSizeMin: 2.4,
             dotSizeMax: 4.2,
             lineDensity: 14,
+            lineThicknessScale: 1.0,
             noiseScale: 7,
             globalScale: 1.0,
         });
@@ -702,7 +704,7 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                                 <span className="text-blue-400 font-bold">Global Scale</span>
                                 <span className="font-mono text-blue-400">{(globalSettings.globalScale || 1.0).toFixed(2)}x</span>
                             </div>
-                            <input type="range" min="0.1" max="3" step="0.05" value={globalSettings.globalScale || 1.0} onChange={e => setGlobalSettings((s: any) => ({ ...s, globalScale: parseFloat(e.target.value) }))} className="w-full accent-blue-500" />
+                            <input type="range" min="0.1" max={GLOBAL_SCALE_MAX} step="0.05" value={globalSettings.globalScale || 1.0} onChange={e => setGlobalSettings((s: any) => ({ ...s, globalScale: parseFloat(e.target.value) }))} className="w-full accent-blue-500" />
                         </div>
 
                         <div className="space-y-1">
@@ -735,6 +737,14 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                                 <span className="font-mono text-gray-400">{globalSettings.lineDensity.toFixed(1)}</span>
                             </div>
                             <input type="range" min="8" max="24" step="1" value={globalSettings.lineDensity} onChange={e => setGlobalSettings(s => ({ ...s, lineDensity: parseFloat(e.target.value) }))} className="w-full accent-purple-500" />
+                        </div>
+
+                        <div className="space-y-1">
+                            <div className="flex justify-between text-[10px]">
+                                <span className="text-gray-300">Line Thickness</span>
+                                <span className="font-mono text-gray-400">{(globalSettings.lineThicknessScale ?? 1.0).toFixed(2)}x</span>
+                            </div>
+                            <input type="range" min={LINE_THICKNESS_SCALE_MIN} max={LINE_THICKNESS_SCALE_MAX} step="0.05" value={globalSettings.lineThicknessScale ?? 1.0} onChange={e => setGlobalSettings(s => ({ ...s, lineThicknessScale: parseFloat(e.target.value) }))} className="w-full accent-purple-500" />
                         </div>
 
                         <div className="space-y-1">

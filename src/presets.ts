@@ -2,6 +2,10 @@ import { Point, FingerprintParams } from './components/FingerprintGenerator';
 
 export type { FingerprintParams };
 
+export const GLOBAL_SCALE_MAX = 10;
+export const LINE_THICKNESS_SCALE_MIN = 0.2;
+export const LINE_THICKNESS_SCALE_MAX = 3;
+
 export const PRESETS = {
   plain: {
     core1: { x: -0.05, y: 0.05 },

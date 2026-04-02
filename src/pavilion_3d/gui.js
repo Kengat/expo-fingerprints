@@ -4,7 +4,7 @@ import { presets } from './params.js';
 export function setupGUI(params, callbacks) {
   const gui = new GUI({ width: 320, title: 'EXPO 2030 — Pavilion UA', autoPlace: false });
 
-  const { onParamChange, onScreenshot, onExportGLTF, onExportOBJ, onExportSTL, onImportModel } = callbacks;
+  const { onParamChange, onScreenshot, onExportGLTF, onExportOBJ, onExportSTL, onImportModel, onRepairImportedGeometry } = callbacks;
 
   // Presets
   const presetNames = Object.keys(presets);
@@ -167,6 +167,11 @@ export function setupGUI(params, callbacks) {
   const imp = gui.addFolder('Import Model');
   const importActions = {
     import() { onImportModel(); },
+    repair() {
+      if (params._importedGeometry && onRepairImportedGeometry) {
+        onRepairImportedGeometry();
+      }
+    },
     clear() {
       params.importMode = false;
       params._importedGeometry = null;
@@ -175,6 +180,7 @@ export function setupGUI(params, callbacks) {
     },
   };
   imp.add(importActions, 'import').name('📂 Import OBJ / STL');
+  imp.add(importActions, 'repair').name('Repair / Make Solid');
   imp.add(params, 'importUVMethod', ['original', 'smart', 'planar', 'box', 'spherical', 'cylindrical']).name('UV Method').onChange(async () => {
     if (params._importedGeometry) {
       // Re-apply UV with new method

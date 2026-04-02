@@ -7,7 +7,7 @@ import { setupPostProcessing, updatePostProcessing, resizePostProcessing } from 
 import { buildPavilion } from '../pavilion_3d/pavilion/index.js';
 import { setupGUI } from '../pavilion_3d/gui.js';
 import { captureScreenshot, exportGLTF, exportOBJ, exportSTL } from '../pavilion_3d/utils/export.js';
-import { importModelFile } from '../pavilion_3d/utils/importModel.js';
+import { importModelFile, applyUVMethod, repairImportedGeometry } from '../pavilion_3d/utils/importModel.js';
 import type { DotCircle, Streamline } from './MergedFingerprintsCanvas';
 
 interface Pavilion3DProps {
@@ -96,6 +96,11 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
             const localParams = { ...defaultParams };
             Object.assign(localParams, presets['Clay Imprint']);
 
+            const clearImportedBakeCaches = () => {
+                (localParams as any)._cachedTubeGeometries = [];
+                (localParams as any)._cachedDrillGeometries = [];
+            };
+
             // 3. Environment & Assets
             setupEnvironment(scene, localParams);
             const composer = setupPostProcessing(renderer, scene, camera, localParams);
@@ -126,10 +131,23 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                     importModelFile(localParams.importUVMethod, (geometry: any) => {
                         localParams._importedGeometry = geometry;
                         localParams.importMode = true;
+                        clearImportedBakeCaches();
                         const g = buildPavilion(scene, localParams);
                         onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
                         updateEnvironment(scene, localParams);
                     });
+                },
+                onRepairImportedGeometry: async () => {
+                    if (!localParams._importedGeometry) return;
+                    const repaired = repairImportedGeometry(localParams._importedGeometry);
+                    await applyUVMethod(repaired, localParams.importUVMethod);
+                    repaired.computeVertexNormals();
+                    localParams._importedGeometry = repaired;
+                    localParams.importMode = true;
+                    clearImportedBakeCaches();
+                    const g = buildPavilion(scene, localParams);
+                    onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
+                    updateEnvironment(scene, localParams);
                 },
             });
 

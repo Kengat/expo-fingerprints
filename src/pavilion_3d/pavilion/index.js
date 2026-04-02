@@ -1472,7 +1472,7 @@ function buildSinglePavilion(p) {
       p._cachedDrillGeometries = drillGeometries.map(g => g.clone());
     }
     // Include cached geometries from previous bakes
-    if (!p.bakeTubes && hasCachedTubes) {
+    if (!hasVectorLines && hasCachedTubes) {
       tubeGeometries = p._cachedTubeGeometries.map(g => g.clone());
       console.log(`[Bake] Reusing ${tubeGeometries.length} cached tube geometries`);
     }

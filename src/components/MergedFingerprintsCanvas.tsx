@@ -935,6 +935,7 @@ export function collectStreamlines(
 
 export function getComputedItems(items: CanvasItem[], globalSettings: any): CanvasItem[] {
     const gs = globalSettings.globalScale || 1.0;
+    const lineThicknessScale = globalSettings.lineThicknessScale ?? 1.0;
     return items.map(it => {
         const dx = it.x - UV_SIZE / 2;
         const dy = it.y - UV_SIZE / 2;
@@ -949,8 +950,8 @@ export function getComputedItems(items: CanvasItem[], globalSettings: any): Canv
                 dotSizeMin: ((it.params.dotSizeMin ?? 0) + (globalSettings.dotSizeMin || 0)) * gs,
                 dotSizeMax: ((it.params.dotSizeMax ?? 0) + (globalSettings.dotSizeMax || 0)) * gs,
                 lineDensity: ((it.params.lineDensity ?? 0) + (globalSettings.lineDensity || 0)) * gs,
-                lineThicknessMin: (it.params.lineThicknessMin ?? 3) * gs,
-                lineThicknessMax: (it.params.lineThicknessMax ?? 3) * gs,
+                lineThicknessMin: (it.params.lineThicknessMin ?? 3) * gs * lineThicknessScale,
+                lineThicknessMax: (it.params.lineThicknessMax ?? 3) * gs * lineThicknessScale,
                 noiseScale: ((it.params.noiseScale ?? 0) + (globalSettings.noiseScale || 0)) / gs,
             }
         };

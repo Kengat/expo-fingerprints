@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // ---------------------------------------------------------------------------
 // UV Checker Texture — colorful numbered grid for debugging UV mapping
@@ -318,11 +318,13 @@ export async function applyUVMethod(geometry, method) {
     }
 
     if (method === 'original') {
-        if (geometry.userData.originalUVs) {
+        if (geometry.userData.originalUVs && geometry.userData.originalUVs.count === geometry.attributes.position.count) {
             geometry.setAttribute('uv', geometry.userData.originalUVs.clone());
         } else if (!geometry.attributes.uv) {
             console.warn('[Import] No original UVs found, falling back to box UV mapping');
             generateBoxUV(geometry);
+        } else if (geometry.userData.originalUVs) {
+            console.warn('[Import] Original UVs no longer match repaired topology, keeping current UVs');
         }
         return;
     }
@@ -375,6 +377,304 @@ function normalizeGeometry(geometry, targetHeight = 15) {
     pos.needsUpdate = true;
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
+}
+
+function ensureIndexedGeometry(geometry) {
+    if (!geometry.index) {
+        const posCount = geometry.attributes.position.count;
+        const idx = new Uint32Array(posCount);
+        for (let i = 0; i < posCount; i++) idx[i] = i;
+        geometry.setIndex(new THREE.BufferAttribute(idx, 1));
+    }
+    return geometry;
+}
+
+function clonePositionOnlyGeometry(geometry) {
+    const clone = new THREE.BufferGeometry();
+    clone.setAttribute('position', geometry.getAttribute('position').clone());
+    if (geometry.index) clone.setIndex(geometry.index.clone());
+    return clone;
+}
+
+function createIndexedGeometryFromIndices(positionAttr, indices) {
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', positionAttr.clone());
+    geom.setIndex(indices);
+    return geom;
+}
+
+function computeTopologyStats(geometry) {
+    const index = geometry.index.array;
+    const edgeCounts = new Map();
+
+    for (let i = 0; i < index.length; i += 3) {
+        const tri = [index[i], index[i + 1], index[i + 2]];
+        for (let e = 0; e < 3; e++) {
+            const a = tri[e];
+            const b = tri[(e + 1) % 3];
+            const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+            edgeCounts.set(key, (edgeCounts.get(key) || 0) + 1);
+        }
+    }
+
+    let boundaryEdges = 0;
+    let nonManifoldEdges = 0;
+    for (const count of edgeCounts.values()) {
+        if (count === 1) boundaryEdges++;
+        else if (count > 2) nonManifoldEdges++;
+    }
+
+    return {
+        faceCount: index.length / 3,
+        boundaryEdges,
+        nonManifoldEdges,
+        uniqueEdges: edgeCounts.size,
+    };
+}
+
+function removeDegenerateTriangles(geometry, minAreaSq) {
+    const pos = geometry.getAttribute('position');
+    const index = geometry.index.array;
+    const kept = [];
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const ab = new THREE.Vector3();
+    const ac = new THREE.Vector3();
+    const cross = new THREE.Vector3();
+
+    for (let i = 0; i < index.length; i += 3) {
+        const i0 = index[i];
+        const i1 = index[i + 1];
+        const i2 = index[i + 2];
+        if (i0 === i1 || i1 === i2 || i2 === i0) continue;
+
+        a.fromBufferAttribute(pos, i0);
+        b.fromBufferAttribute(pos, i1);
+        c.fromBufferAttribute(pos, i2);
+        ab.subVectors(b, a);
+        ac.subVectors(c, a);
+        cross.crossVectors(ab, ac);
+        if (cross.lengthSq() <= minAreaSq) continue;
+
+        kept.push(i0, i1, i2);
+    }
+
+    return createIndexedGeometryFromIndices(pos, kept);
+}
+
+function removeDuplicateTriangles(geometry) {
+    const pos = geometry.getAttribute('position');
+    const index = geometry.index.array;
+    const kept = [];
+    const seen = new Set();
+
+    for (let i = 0; i < index.length; i += 3) {
+        const tri = [index[i], index[i + 1], index[i + 2]];
+        const key = [...tri].sort((a, b) => a - b).join('_');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        kept.push(tri[0], tri[1], tri[2]);
+    }
+
+    return createIndexedGeometryFromIndices(pos, kept);
+}
+
+function extractLargestConnectedComponent(geometry) {
+    const pos = geometry.getAttribute('position');
+    const index = geometry.index.array;
+    const faceCount = index.length / 3;
+    if (faceCount <= 1) return geometry;
+
+    const vertexToFaces = new Map();
+    for (let faceIndex = 0; faceIndex < faceCount; faceIndex++) {
+        for (let j = 0; j < 3; j++) {
+            const vertexIndex = index[faceIndex * 3 + j];
+            if (!vertexToFaces.has(vertexIndex)) vertexToFaces.set(vertexIndex, []);
+            vertexToFaces.get(vertexIndex).push(faceIndex);
+        }
+    }
+
+    const visited = new Uint8Array(faceCount);
+    let largestComponent = [];
+
+    for (let start = 0; start < faceCount; start++) {
+        if (visited[start]) continue;
+        const stack = [start];
+        const faces = [];
+        visited[start] = 1;
+
+        while (stack.length > 0) {
+            const faceIndex = stack.pop();
+            faces.push(faceIndex);
+
+            for (let j = 0; j < 3; j++) {
+                const vertexIndex = index[faceIndex * 3 + j];
+                const neighbors = vertexToFaces.get(vertexIndex) || [];
+                for (const neighbor of neighbors) {
+                    if (!visited[neighbor]) {
+                        visited[neighbor] = 1;
+                        stack.push(neighbor);
+                    }
+                }
+            }
+        }
+
+        if (faces.length > largestComponent.length) {
+            largestComponent = faces;
+        }
+    }
+
+    if (largestComponent.length === faceCount) return geometry;
+
+    const kept = [];
+    for (const faceIndex of largestComponent) {
+        const offset = faceIndex * 3;
+        kept.push(index[offset], index[offset + 1], index[offset + 2]);
+    }
+
+    return createIndexedGeometryFromIndices(pos, kept);
+}
+
+function orientTrianglesConsistently(geometry) {
+    const pos = geometry.getAttribute('position');
+    const index = Array.from(geometry.index.array);
+    const faceCount = index.length / 3;
+    if (faceCount === 0) return geometry;
+
+    const edgeMap = new Map();
+    const makeKey = (a, b) => a < b ? `${a}_${b}` : `${b}_${a}`;
+
+    for (let faceIndex = 0; faceIndex < faceCount; faceIndex++) {
+        const offset = faceIndex * 3;
+        const tri = [index[offset], index[offset + 1], index[offset + 2]];
+        const edges = [
+            [tri[0], tri[1]],
+            [tri[1], tri[2]],
+            [tri[2], tri[0]],
+        ];
+
+        for (const [a, b] of edges) {
+            const key = makeKey(a, b);
+            if (!edgeMap.has(key)) edgeMap.set(key, []);
+            edgeMap.get(key).push({ faceIndex, sameAsCanonical: a < b });
+        }
+    }
+
+    const flips = new Int8Array(faceCount);
+    const visited = new Uint8Array(faceCount);
+
+    for (let start = 0; start < faceCount; start++) {
+        if (visited[start]) continue;
+        const stack = [start];
+        visited[start] = 1;
+
+        while (stack.length > 0) {
+            const faceIndex = stack.pop();
+            const offset = faceIndex * 3;
+            const tri = [index[offset], index[offset + 1], index[offset + 2]];
+            const edges = [
+                [tri[0], tri[1]],
+                [tri[1], tri[2]],
+                [tri[2], tri[0]],
+            ];
+
+            for (const [a, b] of edges) {
+                const key = makeKey(a, b);
+                const refs = edgeMap.get(key) || [];
+                const currentRef = refs.find(ref => ref.faceIndex === faceIndex);
+                for (const ref of refs) {
+                    if (ref.faceIndex === faceIndex || visited[ref.faceIndex]) continue;
+                    const sameDirection = currentRef.sameAsCanonical === ref.sameAsCanonical;
+                    flips[ref.faceIndex] = flips[faceIndex] ^ (sameDirection ? 1 : 0);
+                    visited[ref.faceIndex] = 1;
+                    stack.push(ref.faceIndex);
+                }
+            }
+        }
+    }
+
+    for (let faceIndex = 0; faceIndex < faceCount; faceIndex++) {
+        if (!flips[faceIndex]) continue;
+        const offset = faceIndex * 3;
+        const tmp = index[offset + 1];
+        index[offset + 1] = index[offset + 2];
+        index[offset + 2] = tmp;
+    }
+
+    const oriented = createIndexedGeometryFromIndices(pos, index);
+    oriented.computeBoundingBox();
+    const center = new THREE.Vector3();
+    oriented.boundingBox.getCenter(center);
+
+    let score = 0;
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const ab = new THREE.Vector3();
+    const ac = new THREE.Vector3();
+    const normal = new THREE.Vector3();
+    const centroid = new THREE.Vector3();
+
+    for (let i = 0; i < index.length; i += 3) {
+        a.fromBufferAttribute(pos, index[i]);
+        b.fromBufferAttribute(pos, index[i + 1]);
+        c.fromBufferAttribute(pos, index[i + 2]);
+        ab.subVectors(b, a);
+        ac.subVectors(c, a);
+        normal.crossVectors(ab, ac);
+        centroid.copy(a).add(b).add(c).multiplyScalar(1 / 3);
+        score += normal.dot(centroid.sub(center));
+    }
+
+    if (score < 0) {
+        for (let i = 0; i < index.length; i += 3) {
+            const tmp = index[i + 1];
+            index[i + 1] = index[i + 2];
+            index[i + 2] = tmp;
+        }
+        return createIndexedGeometryFromIndices(pos, index);
+    }
+
+    return oriented;
+}
+
+export function repairImportedGeometry(sourceGeometry, options = {}) {
+    const weldTolerance = options.weldTolerance ?? 0.01;
+    let geometry = clonePositionOnlyGeometry(sourceGeometry);
+    geometry.userData = { ...sourceGeometry.userData };
+
+    ensureIndexedGeometry(geometry);
+    geometry.computeBoundingBox();
+    const size = new THREE.Vector3();
+    geometry.boundingBox.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    const minAreaSq = (maxDim * maxDim) * 1e-12;
+
+    const before = computeTopologyStats(geometry);
+
+    geometry = mergeVertices(geometry, weldTolerance);
+    geometry = removeDegenerateTriangles(geometry, minAreaSq);
+    geometry = removeDuplicateTriangles(geometry);
+    geometry = extractLargestConnectedComponent(geometry);
+    if (!geometry.index || geometry.index.count === 0) {
+        console.warn('[Import] Repair removed all faces, keeping original geometry');
+        return sourceGeometry.clone();
+    }
+    geometry = orientTrianglesConsistently(geometry);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    geometry.userData = {
+        ...sourceGeometry.userData,
+        topologyStats: {
+            before,
+            after: computeTopologyStats(geometry),
+        },
+    };
+
+    console.log('[Import] Repair stats:', geometry.userData.topologyStats);
+    return geometry;
 }
 
 // ---------------------------------------------------------------------------

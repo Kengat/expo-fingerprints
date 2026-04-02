@@ -17,7 +17,7 @@ import { MetaballEditor3D } from './components/MetaballEditor3D';
 import type { MetaballData } from './components/MetaballEditor3D';
 import { MergedFingerprintsCanvas, computeFitView, renderFingerprints, UV_SIZE, collectDotCircles, getComputedItems, createGeometryEdgeDistField, collectStreamlines } from './components/MergedFingerprintsCanvas';
 import type { DotCircle, CanvasItem, EdgeDistanceField, Streamline } from './components/MergedFingerprintsCanvas';
-import { DEFAULT_DOTS_PARAMS, FingerprintParams } from './presets';
+import { DEFAULT_DOTS_PARAMS, FingerprintParams, GLOBAL_SCALE_MAX, LINE_THICKNESS_SCALE_MIN, LINE_THICKNESS_SCALE_MAX } from './presets';
 
 const LOCAL_DEFAULT_DOTS_PARAMS: FingerprintParams = {
   ...DEFAULT_DOTS_PARAMS,
@@ -65,6 +65,7 @@ function loadInitialGlobalSettings() {
     dotSizeMin: 2.4,
     dotSizeMax: 4.2,
     lineDensity: 14,
+    lineThicknessScale: 1.0,
     noiseScale: 7,
     globalScale: 1.0,
   };
@@ -530,9 +531,20 @@ export default function App() {
             </div>
             <input 
                 type="range" 
-                min="0.1" max="3" step="0.05" 
+                min="0.1" max={GLOBAL_SCALE_MAX} step="0.05" 
                 value={globalSettings.globalScale || 1.0} 
                 onChange={e => setGlobalSettings((s: any) => ({ ...s, globalScale: parseFloat(e.target.value) }))}
+                className="w-full accent-blue-500"
+            />
+            <div className="flex justify-between text-xs text-gray-300 mt-4 mb-2 font-medium uppercase tracking-wider">
+                <span>Line Thickness</span>
+                <span className="font-mono text-blue-400">{(globalSettings.lineThicknessScale ?? 1.0).toFixed(2)}x</span>
+            </div>
+            <input
+                type="range"
+                min={LINE_THICKNESS_SCALE_MIN} max={LINE_THICKNESS_SCALE_MAX} step="0.05"
+                value={globalSettings.lineThicknessScale ?? 1.0}
+                onChange={e => setGlobalSettings((s: any) => ({ ...s, lineThicknessScale: parseFloat(e.target.value) }))}
                 className="w-full accent-blue-500"
             />
           </div>
