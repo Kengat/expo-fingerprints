@@ -4,7 +4,18 @@ import { presets } from './params.js';
 export function setupGUI(params, callbacks) {
   const gui = new GUI({ width: 320, title: 'EXPO 2030 — Pavilion UA', autoPlace: false });
 
-  const { onParamChange, onScreenshot, onExportGLTF, onExportOBJ, onExportSTL, onImportModel, onRepairImportedGeometry } = callbacks;
+  const {
+    onParamChange,
+    onScreenshot,
+    onExportGLTF,
+    onExportOBJ,
+    onExportSTL,
+    onImportModel,
+    onImportSecondaryModel,
+    onClearImportedGeometry,
+    onClearSecondaryImportedGeometry,
+    onRepairImportedGeometry
+  } = callbacks;
 
   // Presets
   const presetNames = Object.keys(presets);
@@ -167,31 +178,55 @@ export function setupGUI(params, callbacks) {
   const imp = gui.addFolder('Import Model');
   const importActions = {
     import() { onImportModel(); },
+    importSecond() {
+      if (onImportSecondaryModel) {
+        onImportSecondaryModel();
+      }
+    },
     repair() {
       if (params._importedGeometry && onRepairImportedGeometry) {
         onRepairImportedGeometry();
       }
     },
     clear() {
-      params.importMode = false;
-      params._importedGeometry = null;
+      if (onClearImportedGeometry) {
+        onClearImportedGeometry();
+      } else {
+        params.importMode = false;
+        params._importedGeometry = null;
+        params._secondaryImportedGeometry = null;
+        onParamChange();
+      }
       gui.controllersRecursive().forEach(c => c.updateDisplay());
-      onParamChange();
+    },
+    clearSecond() {
+      if (onClearSecondaryImportedGeometry) {
+        onClearSecondaryImportedGeometry();
+      } else {
+        params._secondaryImportedGeometry = null;
+        onParamChange();
+      }
+      gui.controllersRecursive().forEach(c => c.updateDisplay());
     },
   };
   imp.add(importActions, 'import').name('📂 Import OBJ / STL');
   imp.add(importActions, 'repair').name('Repair / Make Solid');
+  imp.add(importActions, 'importSecond').name('Import Second OBJ / STL');
   imp.add(params, 'importUVMethod', ['original', 'smart', 'planar', 'box', 'spherical', 'cylindrical']).name('UV Method').onChange(async () => {
-    if (params._importedGeometry) {
-      // Re-apply UV with new method
-      const { applyUVMethod } = await import('./utils/importModel.js');
-      await applyUVMethod(params._importedGeometry, params.importUVMethod);
-      onParamChange();
+    const geometries = [params._importedGeometry, params._secondaryImportedGeometry].filter(Boolean);
+    if (geometries.length === 0) return;
+
+    const { applyUVMethod } = await import('./utils/importModel.js');
+    for (const geometry of geometries) {
+      await applyUVMethod(geometry, params.importUVMethod);
+      geometry.computeVertexNormals();
     }
+    onParamChange();
   });
   imp.add(params, 'importScale', 0.1, 5.0, 0.1).name('Scale').onChange(onParamChange);
   imp.add(params, 'importShowUVCheck').name('🔲 UV Check Texture').onChange(onParamChange);
   imp.add(importActions, 'clear').name('🗑️ Clear Import');
+  imp.add(importActions, 'clearSecond').name('Clear Second Import');
   imp.close();
 
   // Export

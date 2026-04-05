@@ -1291,21 +1291,30 @@ function buildSinglePavilion(p) {
   const thickness = needsCSG ? 0.5 : 0;
 
   let shellGeom;
+  let secondaryGeom = null;
 
   if (p.importMode && p._importedGeometry) {
     // Use imported model geometry instead of parametric shell
     shellGeom = p._importedGeometry.clone();
+    secondaryGeom = p._secondaryImportedGeometry ? p._secondaryImportedGeometry.clone() : null;
 
     // Apply import scale
     if (p.importScale !== 1.0) {
       const s = p.importScale;
       shellGeom.scale(s, s, s);
+      if (secondaryGeom) {
+        secondaryGeom.scale(s, s, s);
+      }
     }
 
     shellGeom.computeVertexNormals();
+    if (secondaryGeom) {
+      secondaryGeom.computeVertexNormals();
+    }
 
     // Save base geometry for UV distortion map (before thickening)
     pavilionGroup.userData.baseGeometry = shellGeom.clone();
+    pavilionGroup.userData.secondaryGeometry = secondaryGeom ? secondaryGeom.clone() : null;
 
     // Thicken into solid manifold if CSG bake is needed
     // Use generic thickener (not grid-based) for arbitrary imported meshes
@@ -1335,6 +1344,7 @@ function buildSinglePavilion(p) {
 
     // Save base geometry for UV distortion map (before thickening)
     pavilionGroup.userData.baseGeometry = shellGeom.clone();
+    pavilionGroup.userData.secondaryGeometry = null;
 
     // 5. Thicken it into a solid manifold (if needed for CSG)
     if (thickness > 0) {
@@ -1760,6 +1770,23 @@ function buildSinglePavilion(p) {
   shellMesh.castShadow = true;
   shellMesh.receiveShadow = true;
   pavilionGroup.add(shellMesh);
+
+  if (secondaryGeom) {
+    const secondaryMaterial = new THREE.MeshStandardMaterial({
+      color: '#2563eb',
+      metalness: 0.08,
+      roughness: 0.85,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.95,
+    });
+    const secondaryMesh = new THREE.Mesh(secondaryGeom, secondaryMaterial);
+    secondaryMesh.name = 'secondary-imported-geometry';
+    secondaryMesh.castShadow = true;
+    secondaryMesh.receiveShadow = true;
+    pavilionGroup.add(secondaryMesh);
+  }
+
   pavilionGroup.userData.bakePromise = bakePromise;
 
   const structMaterial = new THREE.MeshStandardMaterial({
@@ -1788,7 +1815,7 @@ function buildSinglePavilion(p) {
     }
   }
 
-  const fabric = createFabricDrape(p, shellGeom, fabricSceneOriginY);
+  const fabric = createFabricDrape(p, shellGeom, secondaryGeom, fabricSceneOriginY);
   if (fabric) pavilionGroup.add(fabric);
 
   return pavilionGroup;
@@ -1905,6 +1932,7 @@ export function buildPavilion(scene, p) {
   rootGroup = applyComposition(scene, singlePavilion, p);
   rootGroup.userData.bakePromise = singlePavilion.userData.bakePromise || Promise.resolve();
   rootGroup.userData.baseGeometry = singlePavilion.userData.baseGeometry;
+  rootGroup.userData.secondaryGeometry = singlePavilion.userData.secondaryGeometry ?? null;
 
   scene.add(rootGroup);
   return rootGroup;

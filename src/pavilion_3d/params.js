@@ -134,6 +134,7 @@ export const params = {
   importScale: 1.0,
   importShowUVCheck: false,
   _importedGeometry: null,
+  _secondaryImportedGeometry: null,
 };
 
 export const presets = {

@@ -92,6 +92,7 @@ export default function App() {
   const [dotCircles, setDotCircles] = useState<DotCircle[]>([]);
   const [streamlines, setStreamlines] = useState<Streamline[]>([]);
   const [baseGeometry, setBaseGeometry] = useState<THREE.BufferGeometry | null>(null);
+  const [secondaryGeometry, setSecondaryGeometry] = useState<THREE.BufferGeometry | null>(null);
   const [extrusionPreview, setExtrusionPreview] = useState(false);
   const [extrusionThickness, setExtrusionThickness] = useState(5.0);
 
@@ -216,17 +217,23 @@ export default function App() {
     delete exportParams._fingerprintCanvasHeight;
 
     let importedGeomJson = null;
+    let secondaryImportedGeomJson = null;
     if (exportParams._importedGeometry) {
       importedGeomJson = exportParams._importedGeometry.toJSON();
     }
+    if (exportParams._secondaryImportedGeometry) {
+      secondaryImportedGeomJson = exportParams._secondaryImportedGeometry.toJSON();
+    }
     delete exportParams._importedGeometry;
+    delete exportParams._secondaryImportedGeometry;
 
     const projectData = {
-      version: 1,
+      version: 2,
       items,
       globalSettings,
       params: exportParams,
-      importedGeomJson
+      importedGeomJson,
+      secondaryImportedGeomJson
     };
 
     const blob = new Blob([JSON.stringify(projectData)], { type: 'application/json' });
@@ -264,6 +271,12 @@ export default function App() {
             engine.params._importedGeometry = loader.parse(data.importedGeomJson);
           } else {
             engine.params._importedGeometry = null;
+          }
+          if (data.secondaryImportedGeomJson) {
+            const loader = new THREE.BufferGeometryLoader();
+            engine.params._secondaryImportedGeometry = loader.parse(data.secondaryImportedGeomJson);
+          } else {
+            engine.params._secondaryImportedGeometry = null;
           }
 
           // Trigger GUI update and rebuild
@@ -309,6 +322,7 @@ export default function App() {
           dotCircles={dotCircles}
           streamlines={streamlines}
           onBaseGeometryUpdate={setBaseGeometry}
+          onSecondaryGeometryUpdate={setSecondaryGeometry}
           editing3D={isEditing3D}
           fabricEnabled={fabricEnabled}
           fabricItems={fabricItems}
@@ -353,6 +367,7 @@ export default function App() {
                   engine.params.previewExtrusionThickness = extrusionThickness;
                   const g = buildPavilion(engine.scene, engine.params);
                   setBaseGeometry(g.userData.baseGeometry ?? null);
+                  setSecondaryGeometry(g.userData.secondaryGeometry ?? null);
                 }}
               />
               <span className="text-xs font-medium text-slate-200">Extrusion Preview</span>
@@ -375,6 +390,7 @@ export default function App() {
                   if (extrusionPreview) {
                     const g = buildPavilion(engine.scene, engine.params);
                     setBaseGeometry(g.userData.baseGeometry ?? null);
+                    setSecondaryGeometry(g.userData.secondaryGeometry ?? null);
                   }
                 }}
               />
@@ -623,6 +639,7 @@ export default function App() {
               externalItems={fabricItems}
               onItemsChange={setFabricItems}
               baseGeometry={baseGeometry}
+              secondaryGeometry={secondaryGeometry}
               radius={globalSettings.radiusBottom || 20}
             />
           </div>

@@ -31,6 +31,7 @@ interface FabricCanvasProps {
     externalItems?: FabricItem[];
     onItemsChange?: (items: FabricItem[]) => void;
     baseGeometry?: THREE.BufferGeometry | null;
+    secondaryGeometry?: THREE.BufferGeometry | null;
     radius?: number;
 }
 
@@ -266,17 +267,23 @@ const generateFlowPolylines = (config: typeof defaultFlowConfig, bounds: number)
 };
 
 export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
-    const { externalItems, onItemsChange, baseGeometry, radius = 20 } = props;
+    const { externalItems, onItemsChange, baseGeometry, secondaryGeometry, radius = 20 } = props;
     
     const getBounds = () => {
-        if (baseGeometry) {
-            if (!baseGeometry.boundingBox) baseGeometry.computeBoundingBox();
-            const bbox = baseGeometry.boundingBox;
-            if (bbox) {
-                const maxExtent = Math.max(
+        const geometries = [baseGeometry, secondaryGeometry].filter(Boolean) as THREE.BufferGeometry[];
+        if (geometries.length > 0) {
+            let maxExtent = 0;
+            for (const geometry of geometries) {
+                if (!geometry.boundingBox) geometry.computeBoundingBox();
+                const bbox = geometry.boundingBox;
+                if (!bbox) continue;
+                maxExtent = Math.max(
+                    maxExtent,
                     Math.abs(bbox.max.x), Math.abs(bbox.min.x),
                     Math.abs(bbox.max.z), Math.abs(bbox.min.z)
                 );
+            }
+            if (maxExtent > 0) {
                 return maxExtent * 1.2; // 20% margin
             }
         }
@@ -320,12 +327,12 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
 
     // Adjust zoom once geometry is loaded to ensure it fits
     useEffect(() => {
-        if (baseGeometry) {
+        if (baseGeometry || secondaryGeometry) {
             const b = getBounds();
             const targetZoom = Math.min(50, Math.max(2, (window.innerHeight - 200) / (b * 2.5)));
             setView(v => ({ ...v, zoom: targetZoom }));
         }
-    }, [baseGeometry]);
+    }, [baseGeometry, secondaryGeometry]);
     const [dragAction, setDragAction] = useState<any>(null);
     
     const containerRef = useRef<HTMLDivElement>(null);
@@ -465,7 +472,7 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
     // Draw geometry wireframe
     useEffect(() => {
         const canvas = geomCanvasRef.current;
-        if (!canvas || !baseGeometry) return;
+        if (!canvas || (!baseGeometry && !secondaryGeometry)) return;
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
@@ -477,42 +484,60 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
         ctx.translate(view.x, view.y);
         ctx.scale(view.zoom, view.zoom);
 
-        const edges = extractGeometryEdgesXZ(baseGeometry);
-        ctx.strokeStyle = 'rgba(0,0,0,0.04)';
-        ctx.lineWidth = 0.5 / view.zoom;
-        ctx.beginPath();
-        for (const e of edges) {
-            ctx.moveTo(e.x1, e.z1);
-            ctx.lineTo(e.x2, e.z2);
-        }
-        ctx.stroke();
+        const drawGeometry = (
+            geometry: THREE.BufferGeometry | null | undefined,
+            palette: { edge: string; outline: string; fill: string }
+        ) => {
+            if (!geometry) return;
 
-        const chains = extractGeometryOutlineXZ(baseGeometry);
-        ctx.strokeStyle = 'rgba(0,0,0,0.25)';
-        ctx.lineWidth = 2 / view.zoom;
-        for (const chain of chains) {
+            const edges = extractGeometryEdgesXZ(geometry);
+            ctx.strokeStyle = palette.edge;
+            ctx.lineWidth = 0.5 / view.zoom;
             ctx.beginPath();
-            for (let i = 0; i < chain.length; i++) {
-                if (i === 0) ctx.moveTo(chain[i].x, chain[i].z);
-                else ctx.lineTo(chain[i].x, chain[i].z);
+            for (const e of edges) {
+                ctx.moveTo(e.x1, e.z1);
+                ctx.lineTo(e.x2, e.z2);
             }
-            ctx.closePath();
             ctx.stroke();
-        }
 
-        ctx.fillStyle = 'rgba(180, 160, 130, 0.08)';
-        for (const chain of chains) {
-            ctx.beginPath();
-            for (let i = 0; i < chain.length; i++) {
-                if (i === 0) ctx.moveTo(chain[i].x, chain[i].z);
-                else ctx.lineTo(chain[i].x, chain[i].z);
+            const chains = extractGeometryOutlineXZ(geometry);
+            ctx.strokeStyle = palette.outline;
+            ctx.lineWidth = 2 / view.zoom;
+            for (const chain of chains) {
+                ctx.beginPath();
+                for (let i = 0; i < chain.length; i++) {
+                    if (i === 0) ctx.moveTo(chain[i].x, chain[i].z);
+                    else ctx.lineTo(chain[i].x, chain[i].z);
+                }
+                ctx.closePath();
+                ctx.stroke();
             }
-            ctx.closePath();
-            ctx.fill();
-        }
+
+            ctx.fillStyle = palette.fill;
+            for (const chain of chains) {
+                ctx.beginPath();
+                for (let i = 0; i < chain.length; i++) {
+                    if (i === 0) ctx.moveTo(chain[i].x, chain[i].z);
+                    else ctx.lineTo(chain[i].x, chain[i].z);
+                }
+                ctx.closePath();
+                ctx.fill();
+            }
+        };
+
+        drawGeometry(baseGeometry, {
+            edge: 'rgba(0,0,0,0.04)',
+            outline: 'rgba(0,0,0,0.25)',
+            fill: 'rgba(180, 160, 130, 0.08)',
+        });
+        drawGeometry(secondaryGeometry, {
+            edge: 'rgba(37, 99, 235, 0.10)',
+            outline: 'rgba(37, 99, 235, 0.65)',
+            fill: 'rgba(37, 99, 235, 0.12)',
+        });
 
         ctx.restore();
-    }, [baseGeometry, view, dimensions]);
+    }, [baseGeometry, secondaryGeometry, view, dimensions]);
 
     // Draw fabric lines
     useEffect(() => {

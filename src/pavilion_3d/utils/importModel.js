@@ -347,36 +347,92 @@ export async function applyUVMethod(geometry, method) {
 }
 
 // ---------------------------------------------------------------------------
-// Normalize geometry: center + scale to target height
+// Normalize geometry: shared center + shared scale for one or more imports
 // ---------------------------------------------------------------------------
 
-function normalizeGeometry(geometry, targetHeight = 15) {
-    geometry.computeBoundingBox();
-    const bb = geometry.boundingBox;
+function buildCombinedImportTransform(geometries, targetHeight = 15) {
+    const bbox = new THREE.Box3();
+    let hasGeometry = false;
+
+    for (const geometry of geometries) {
+        if (!geometry) continue;
+        geometry.computeBoundingBox();
+        if (!geometry.boundingBox) continue;
+        bbox.union(geometry.boundingBox);
+        hasGeometry = true;
+    }
+
+    if (!hasGeometry) return null;
+
     const center = new THREE.Vector3();
-    bb.getCenter(center);
+    bbox.getCenter(center);
+
     const size = new THREE.Vector3();
-    bb.getSize(size);
+    bbox.getSize(size);
 
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     const scale = targetHeight / maxDim;
 
-    // Store the full transform so export can reverse it to original coordinates
-    geometry.userData.importTransform = {
-        centerX: center.x, centerY: center.y, centerZ: center.z,
-        scale: scale,
-        targetHeight: targetHeight,
+    return {
+        centerX: center.x,
+        centerY: center.y,
+        centerZ: center.z,
+        scale,
+        targetHeight,
     };
+}
 
-    const pos = geometry.getAttribute('position');
+function applyImportTransform(geometry, transform) {
+    if (!geometry || !transform) return geometry;
+
+    const normalized = geometry.clone();
+    normalized.userData = {
+        ...geometry.userData,
+        importTransform: { ...transform },
+    };
+    if (geometry.userData?.originalUVs) {
+        normalized.userData.originalUVs = geometry.userData.originalUVs.clone();
+    }
+
+    const pos = normalized.getAttribute('position');
     for (let i = 0; i < pos.count; i++) {
-        pos.setX(i, (pos.getX(i) - center.x) * scale);
-        pos.setY(i, (pos.getY(i) - center.y) * scale + targetHeight / 2);
-        pos.setZ(i, (pos.getZ(i) - center.z) * scale);
+        pos.setX(i, (pos.getX(i) - transform.centerX) * transform.scale);
+        pos.setY(i, (pos.getY(i) - transform.centerY) * transform.scale + transform.targetHeight / 2);
+        pos.setZ(i, (pos.getZ(i) - transform.centerZ) * transform.scale);
     }
     pos.needsUpdate = true;
-    geometry.computeBoundingBox();
-    geometry.computeBoundingSphere();
+    normalized.computeBoundingBox();
+    normalized.computeBoundingSphere();
+    return normalized;
+}
+
+export function denormalizeImportedGeometry(geometry) {
+    if (!geometry) return null;
+    const transform = geometry.userData?.importTransform;
+    if (!transform) return geometry.clone();
+
+    const raw = geometry.clone();
+    const pos = raw.getAttribute('position');
+    for (let i = 0; i < pos.count; i++) {
+        pos.setX(i, pos.getX(i) / transform.scale + transform.centerX);
+        pos.setY(i, (pos.getY(i) - transform.targetHeight / 2) / transform.scale + transform.centerY);
+        pos.setZ(i, pos.getZ(i) / transform.scale + transform.centerZ);
+    }
+    pos.needsUpdate = true;
+    raw.computeBoundingBox();
+    raw.computeBoundingSphere();
+    raw.userData = { ...raw.userData };
+    if (geometry.userData?.originalUVs) {
+        raw.userData.originalUVs = geometry.userData.originalUVs.clone();
+    }
+    delete raw.userData.importTransform;
+    return raw;
+}
+
+export function normalizeImportedGeometries(geometries, targetHeight = 15) {
+    const transform = buildCombinedImportTransform(geometries, targetHeight);
+    if (!transform) return [];
+    return geometries.map((geometry) => applyImportTransform(geometry, transform));
 }
 
 function ensureIndexedGeometry(geometry) {
@@ -714,89 +770,84 @@ function collectGeometries(object) {
 // Main import function
 // ---------------------------------------------------------------------------
 
+async function loadRawModelGeometry(file) {
+    const fileName = file.name.toLowerCase();
+
+    if (fileName.endsWith('.stl')) {
+        const loader = new STLLoader();
+        const buffer = await file.arrayBuffer();
+        const geometry = loader.parse(buffer);
+        console.log(`[Import] STL loaded: ${geometry.attributes.position.count} vertices`);
+        return geometry;
+    }
+
+    if (fileName.endsWith('.obj')) {
+        const loader = new OBJLoader();
+        const text = await file.text();
+        const object = loader.parse(text);
+        const geometries = collectGeometries(object);
+
+        if (geometries.length === 0) {
+            throw new Error('No geometry found in OBJ file');
+        }
+
+        console.log(`[Import] OBJ loaded: ${geometries.length} component(s)`);
+
+        let merged;
+        if (geometries.length === 1) {
+            merged = geometries[0];
+        } else {
+            merged = mergeGeometries(geometries, false);
+            for (const g of geometries) g.dispose();
+        }
+
+        if (!merged) {
+            throw new Error('Failed to merge geometries');
+        }
+
+        if (merged.attributes.uv) {
+            merged.userData.originalUVs = merged.attributes.uv.clone();
+        }
+
+        console.log(`[Import] Merged geometry: ${merged.attributes.position.count} vertices`);
+        return merged;
+    }
+
+    throw new Error('Unsupported file format. Use .obj or .stl');
+}
+
 /**
- * Opens a file dialog, loads OBJ or STL, merges all components,
- * generates UV mapping, normalizes size, and calls the callback.
+ * Opens a file dialog, loads OBJ or STL and calls the callback with either
+ * the raw geometry or a normalized version depending on options.
  *
  * @param {string} uvMethod - 'box' | 'spherical' | 'cylindrical'
- * @param {Function} callback - (geometry: THREE.BufferGeometry) => void
+ * @param {Function} callback - (geometry: THREE.BufferGeometry, file: File) => void
+ * @param {{ normalize?: boolean, targetHeight?: number }} options
  */
-export function importModelFile(uvMethod, callback) {
+export function importModelFile(uvMethod, callback, options = {}) {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.obj,.stl';
 
-    input.addEventListener('change', (event) => {
+    input.addEventListener('change', async (event) => {
         const file = event.target.files[0];
         if (!file) return;
 
-        const fileName = file.name.toLowerCase();
-        const reader = new FileReader();
+        try {
+            const rawGeometry = await loadRawModelGeometry(file);
+            const shouldNormalize = options.normalize !== false;
+            let geometry = rawGeometry;
 
-        if (fileName.endsWith('.stl')) {
-            reader.onload = async (e) => {
-                try {
-                    const loader = new STLLoader();
-                    const geometry = loader.parse(e.target.result);
+            if (shouldNormalize) {
+                const [normalizedGeometry] = normalizeImportedGeometries([rawGeometry], options.targetHeight ?? 15);
+                geometry = normalizedGeometry;
+            }
 
-                    normalizeGeometry(geometry);
-                    await applyUVMethod(geometry, uvMethod);
-                    geometry.computeVertexNormals();
-
-                    console.log(`[Import] STL loaded: ${geometry.attributes.position.count} vertices`);
-                    callback(geometry);
-                } catch (err) {
-                    console.error('[Import] STL parse error:', err);
-                }
-            };
-            reader.readAsArrayBuffer(file);
-
-        } else if (fileName.endsWith('.obj')) {
-            reader.onload = async (e) => {
-                try {
-                    const loader = new OBJLoader();
-                    const object = loader.parse(e.target.result);
-
-                    const geometries = collectGeometries(object);
-                    if (geometries.length === 0) {
-                        console.error('[Import] No geometry found in OBJ file');
-                        return;
-                    }
-
-                    console.log(`[Import] OBJ loaded: ${geometries.length} component(s)`);
-
-                    let merged;
-                    if (geometries.length === 1) {
-                        merged = geometries[0];
-                    } else {
-                        merged = mergeGeometries(geometries, false);
-                        // Dispose originals
-                        for (const g of geometries) g.dispose();
-                    }
-
-                    if (!merged) {
-                        console.error('[Import] Failed to merge geometries');
-                        return;
-                    }
-
-                    if (merged.attributes.uv) {
-                        merged.userData.originalUVs = merged.attributes.uv.clone();
-                    }
-
-                    normalizeGeometry(merged);
-                    await applyUVMethod(merged, uvMethod);
-                    merged.computeVertexNormals();
-
-                    console.log(`[Import] Merged geometry: ${merged.attributes.position.count} vertices`);
-                    callback(merged);
-                } catch (err) {
-                    console.error('[Import] OBJ parse error:', err);
-                }
-            };
-            reader.readAsText(file);
-
-        } else {
-            console.error('[Import] Unsupported file format. Use .obj or .stl');
+            await applyUVMethod(geometry, uvMethod);
+            geometry.computeVertexNormals();
+            callback(geometry, file);
+        } catch (err) {
+            console.error('[Import] Parse error:', err);
         }
     });
 

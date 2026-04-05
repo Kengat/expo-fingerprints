@@ -41,7 +41,7 @@ function buildMetaballMesh(metaballs) {
   return { mesh, dispose() { geom.dispose(); mat.dispose(); mc.geometry.dispose(); } };
 }
 
-export function createFabricDrape(p, baseGeometry, sceneOriginY) {
+export function createFabricDrape(p, baseGeometry, secondaryGeometry, sceneOriginY) {
   const group = new THREE.Group();
   group.name = 'fabric-drape';
 
@@ -49,6 +49,9 @@ export function createFabricDrape(p, baseGeometry, sceneOriginY) {
 
   // Create a mesh for raycasting against the base geometry
   const raycastMesh = new THREE.Mesh(baseGeometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+  const secondaryRaycastMesh = secondaryGeometry
+    ? new THREE.Mesh(secondaryGeometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }))
+    : null;
   
   const raycaster = new THREE.Raycaster();
 
@@ -150,6 +153,7 @@ export function createFabricDrape(p, baseGeometry, sceneOriginY) {
       const origin = new THREE.Vector3(x, topHeight, waveZ);
       const dir = new THREE.Vector3(0, -1, 0);
       raycaster.set(origin, dir);
+      raycaster.far = Infinity;
       
       const intersects = raycaster.intersectObject(raycastMesh, false);
       
@@ -157,13 +161,33 @@ export function createFabricDrape(p, baseGeometry, sceneOriginY) {
         // The fabric hangs DOWN from the geometry
         const topY = intersects[0].point.y;
         let bottomY = fabricBottomY;
+        let hasBottomBoundary = !secondaryRaycastMesh;
+
+        if (secondaryRaycastMesh) {
+          const lowerOrigin = new THREE.Vector3(x, topY - 0.01, waveZ);
+          raycaster.set(lowerOrigin, dir);
+          raycaster.far = Infinity;
+          const lowerHits = raycaster.intersectObject(secondaryRaycastMesh, false);
+          const lowerHit = lowerHits.find((hit) => hit.point.y < topY - 0.01);
+
+          if (!lowerHit) {
+            if (currentStrip.length > 0) {
+              strips.push(currentStrip);
+              currentStrip = [];
+            }
+            continue;
+          }
+
+          bottomY = lowerHit.point.y;
+          hasBottomBoundary = true;
+        }
 
         // Clip against metaballs by raycasting downward onto the metaball mesh
         if (mbMesh) {
-          const mbOrigin = new THREE.Vector3(x, topY, waveZ);
+          const mbOrigin = new THREE.Vector3(x, topY - 0.01, waveZ);
           const mbDir = new THREE.Vector3(0, -1, 0);
           mbRaycaster.set(mbOrigin, mbDir);
-          mbRaycaster.far = topY - fabricBottomY + 1;
+          mbRaycaster.far = Math.max(0.01, topY - bottomY + 1);
           const mbHits = mbRaycaster.intersectObject(mbMesh, false);
           if (mbHits.length > 0) {
             const hitY = mbHits[0].point.y;
@@ -175,8 +199,16 @@ export function createFabricDrape(p, baseGeometry, sceneOriginY) {
               }
               continue;
             }
-            bottomY = hitY;
+            bottomY = Math.max(bottomY, hitY);
           }
+        }
+
+        if (!hasBottomBoundary || topY - bottomY <= 0.01) {
+          if (currentStrip.length > 0) {
+            strips.push(currentStrip);
+            currentStrip = [];
+          }
+          continue;
         }
 
         currentStrip.push({ x, topY, bottomY, z: waveZ, u: j / segments });
@@ -242,6 +274,10 @@ export function createFabricDrape(p, baseGeometry, sceneOriginY) {
   }
 
   if (mbDispose) mbDispose();
+  raycastMesh.material.dispose();
+  if (secondaryRaycastMesh) {
+    secondaryRaycastMesh.material.dispose();
+  }
 
   return group;
 }

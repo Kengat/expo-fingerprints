@@ -7,7 +7,13 @@ import { setupPostProcessing, updatePostProcessing, resizePostProcessing } from 
 import { buildPavilion } from '../pavilion_3d/pavilion/index.js';
 import { setupGUI } from '../pavilion_3d/gui.js';
 import { captureScreenshot, exportGLTF, exportOBJ, exportSTL } from '../pavilion_3d/utils/export.js';
-import { importModelFile, applyUVMethod, repairImportedGeometry } from '../pavilion_3d/utils/importModel.js';
+import {
+    importModelFile,
+    applyUVMethod,
+    repairImportedGeometry,
+    denormalizeImportedGeometry,
+    normalizeImportedGeometries
+} from '../pavilion_3d/utils/importModel.js';
 import type { DotCircle, Streamline } from './MergedFingerprintsCanvas';
 
 interface Pavilion3DProps {
@@ -19,6 +25,7 @@ interface Pavilion3DProps {
     dotCircles?: DotCircle[];
     streamlines?: Streamline[];
     onBaseGeometryUpdate?: (geom: THREE.BufferGeometry | null) => void;
+    onSecondaryGeometryUpdate?: (geom: THREE.BufferGeometry | null) => void;
     editing3D?: boolean;
     fabricEnabled?: boolean;
     fabricItems?: any[];
@@ -32,13 +39,16 @@ export interface Pavilion3DHandle {
         camera: THREE.PerspectiveCamera;
         controls: import('three/addons/controls/OrbitControls.js').OrbitControls;
         params: any;
+        guiObj?: any;
     } | null;
 }
 
-export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, bakeTubesTrigger = 0, previewTubesTrigger = 0, showSolidCheck = false, dotCircles = [], streamlines = [], onBaseGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [], metaballs = [] }, ref) {
+export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, bakeTubesTrigger = 0, previewTubesTrigger = 0, showSolidCheck = false, dotCircles = [], streamlines = [], onBaseGeometryUpdate, onSecondaryGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [], metaballs = [] }, ref) {
     const mountRef = useRef<HTMLDivElement>(null);
     const onBaseGeomRef = useRef(onBaseGeometryUpdate);
     onBaseGeomRef.current = onBaseGeometryUpdate;
+    const onSecondaryGeomRef = useRef(onSecondaryGeometryUpdate);
+    onSecondaryGeomRef.current = onSecondaryGeometryUpdate;
     const engineRef = useRef<{
         renderer: THREE.WebGLRenderer;
         scene: THREE.Scene;
@@ -101,6 +111,53 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                 (localParams as any)._cachedDrillGeometries = [];
             };
 
+            const rebuildScene = () => {
+                const g = buildPavilion(scene, localParams);
+                onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
+                onSecondaryGeomRef.current?.(g.userData.secondaryGeometry ?? null);
+                updateEnvironment(scene, localParams);
+                return g;
+            };
+
+            const applySharedImportedGeometryLayout = async (
+                nextPrimaryRaw?: THREE.BufferGeometry | null,
+                nextSecondaryRaw?: THREE.BufferGeometry | null
+            ) => {
+                const primaryRaw = nextPrimaryRaw === undefined
+                    ? (localParams._importedGeometry ? denormalizeImportedGeometry(localParams._importedGeometry) : null)
+                    : nextPrimaryRaw;
+                const secondaryRaw = nextSecondaryRaw === undefined
+                    ? (localParams._secondaryImportedGeometry ? denormalizeImportedGeometry(localParams._secondaryImportedGeometry) : null)
+                    : nextSecondaryRaw;
+
+                if (!primaryRaw) {
+                    localParams.importMode = false;
+                    localParams._importedGeometry = null;
+                    localParams._secondaryImportedGeometry = null;
+                    clearImportedBakeCaches();
+                    rebuildScene();
+                    return;
+                }
+
+                const sources = secondaryRaw ? [primaryRaw, secondaryRaw] : [primaryRaw];
+                const [normalizedPrimary, normalizedSecondary] = normalizeImportedGeometries(sources, 15);
+
+                if (normalizedPrimary) {
+                    await applyUVMethod(normalizedPrimary, localParams.importUVMethod);
+                    normalizedPrimary.computeVertexNormals();
+                }
+                if (normalizedSecondary) {
+                    await applyUVMethod(normalizedSecondary, localParams.importUVMethod);
+                    normalizedSecondary.computeVertexNormals();
+                }
+
+                localParams._importedGeometry = normalizedPrimary ?? null;
+                localParams._secondaryImportedGeometry = normalizedSecondary ?? null;
+                localParams.importMode = !!normalizedPrimary;
+                clearImportedBakeCaches();
+                rebuildScene();
+            };
+
             // 3. Environment & Assets
             setupEnvironment(scene, localParams);
             const composer = setupPostProcessing(renderer, scene, camera, localParams);
@@ -108,46 +165,64 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
             // Initial build
             const initialGroup = buildPavilion(scene, localParams);
             onBaseGeomRef.current?.(initialGroup.userData.baseGeometry ?? null);
+            onSecondaryGeomRef.current?.(initialGroup.userData.secondaryGeometry ?? null);
 
             // Debounced rebuild for GUI
             let rebuildTimeout: number | null = null;
             const onParamChange = () => {
                 if (rebuildTimeout) clearTimeout(rebuildTimeout);
                 rebuildTimeout = window.setTimeout(() => {
-                    const g = buildPavilion(scene, localParams);
-                    onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
-                    updateEnvironment(scene, localParams);
+                    rebuildScene();
                     updatePostProcessing(localParams);
                 }, 50);
             };
 
-            const guiObj = setupGUI(localParams, {
+            let guiObj: any = null;
+            guiObj = setupGUI(localParams, {
                 onParamChange,
                 onScreenshot: () => { captureScreenshot(renderer); },
                 onExportGLTF: () => { exportGLTF(scene, localParams); },
                 onExportOBJ: () => { exportOBJ(scene, localParams); },
                 onExportSTL: () => { exportSTL(scene, localParams); },
                 onImportModel: () => {
-                    importModelFile(localParams.importUVMethod, (geometry: any) => {
-                        localParams._importedGeometry = geometry;
-                        localParams.importMode = true;
-                        clearImportedBakeCaches();
-                        const g = buildPavilion(scene, localParams);
-                        onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
-                        updateEnvironment(scene, localParams);
-                    });
+                    importModelFile(localParams.importUVMethod, async (geometry: any) => {
+                        await applySharedImportedGeometryLayout(geometry, undefined);
+                        if (guiObj) {
+                            guiObj.controllersRecursive().forEach((c: any) => c.updateDisplay());
+                        }
+                    }, { normalize: false });
+                },
+                onImportSecondaryModel: () => {
+                    if (!localParams._importedGeometry) {
+                        alert('Import the main geometry first.');
+                        return;
+                    }
+
+                    importModelFile(localParams.importUVMethod, async (geometry: any) => {
+                        await applySharedImportedGeometryLayout(undefined, geometry);
+                        if (guiObj) {
+                            guiObj.controllersRecursive().forEach((c: any) => c.updateDisplay());
+                        }
+                    }, { normalize: false });
                 },
                 onRepairImportedGeometry: async () => {
                     if (!localParams._importedGeometry) return;
-                    const repaired = repairImportedGeometry(localParams._importedGeometry);
-                    await applyUVMethod(repaired, localParams.importUVMethod);
-                    repaired.computeVertexNormals();
-                    localParams._importedGeometry = repaired;
-                    localParams.importMode = true;
-                    clearImportedBakeCaches();
-                    const g = buildPavilion(scene, localParams);
-                    onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
-                    updateEnvironment(scene, localParams);
+                    const repairedPrimary = repairImportedGeometry(
+                        denormalizeImportedGeometry(localParams._importedGeometry)
+                    );
+                    const secondaryRaw = localParams._secondaryImportedGeometry
+                        ? denormalizeImportedGeometry(localParams._secondaryImportedGeometry)
+                        : null;
+                    await applySharedImportedGeometryLayout(repairedPrimary, secondaryRaw);
+                    if (guiObj) {
+                        guiObj.controllersRecursive().forEach((c: any) => c.updateDisplay());
+                    }
+                },
+                onClearImportedGeometry: async () => {
+                    await applySharedImportedGeometryLayout(null, null);
+                },
+                onClearSecondaryImportedGeometry: async () => {
+                    await applySharedImportedGeometryLayout(undefined, null);
                 },
             });
 
@@ -209,6 +284,7 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
             camera: engineRef.current.camera,
             controls: engineRef.current.controls,
             params: engineRef.current.params,
+            guiObj: engineRef.current.guiObj,
         } : null,
     }), []);
 
@@ -256,6 +332,7 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                 // Full rebuild with CSG holes
                 const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
                 onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
+                onSecondaryGeomRef.current?.(g.userData.secondaryGeometry ?? null);
             } else if (editing3D) {
                 // Fast path for live 3D editing: just update the texture without rebuilding geometry
                 let shellMesh: any = null;
@@ -283,6 +360,7 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                 // Non-bake rebuild (preview, texture-only apply)
                 const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
                 onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
+                onSecondaryGeomRef.current?.(g.userData.secondaryGeometry ?? null);
             }
 
             if (engineRef.current.params.skinType !== 'fingerprint') {
@@ -310,6 +388,7 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
             if (needsUpdate) {
                 const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
                 onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
+                onSecondaryGeomRef.current?.(g.userData.secondaryGeometry ?? null);
             }
         }
     }, [fabricEnabled, fabricItems, metaballs]);
