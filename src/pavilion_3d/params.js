@@ -30,6 +30,15 @@ export const params = {
   ribDirection: 'meridional',
   columnCount: 0,
   columnBranching: 3,
+  glassSystemEnabled: false,
+  glassFrameMode: 'grid',
+  glassFrameRadius: 0.08,
+  glassSharpAngle: 18,
+  glassGridU: 4,
+  glassGridV: 5,
+  glassPanelColor: '#d8eefc',
+  glassPanelOpacity: 0.22,
+  glassFrameColor: '#6b7785',
 
   // Skin
   skinType: 'none',
@@ -135,6 +144,7 @@ export const params = {
   importShowUVCheck: false,
   _importedGeometry: null,
   _secondaryImportedGeometry: null,
+  _glassGeometry: null,
 };
 
 export const presets = {

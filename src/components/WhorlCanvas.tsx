@@ -98,6 +98,7 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
             lineThicknessScale: 1.0,
             noiseScale: 7,
             globalScale: 1.0,
+            bgLinesCreateTubes: false,
         };
     });
     const globalSettings = externalGlobalSettings ?? internalGlobalSettings;
@@ -167,6 +168,7 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
             lineThicknessScale: 1.0,
             noiseScale: 7,
             globalScale: 1.0,
+            bgLinesCreateTubes: false,
         });
         setSelectedId('initial');
     };
@@ -688,13 +690,13 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
             </div>
 
             {/* Right Side Panels */}
-            <div className="absolute top-4 right-4 flex flex-col gap-4 z-50 pointer-events-none w-[220px]">
+            <div className="absolute top-4 right-4 bottom-4 flex flex-col gap-4 z-50 pointer-events-none w-[220px] min-h-0">
                 {/* Global Settings Panel */}
                 <div 
                     onMouseEnter={() => { isOverPanel.current = true; }}
                     onMouseLeave={() => { isOverPanel.current = false; }}
                     onWheel={e => e.stopPropagation()}
-                    className="bg-[#1C1D21]/95 backdrop-blur-md border border-white/10 shadow-2xl rounded-2xl p-3 flex flex-col gap-3 pointer-events-auto max-h-[50vh] overflow-y-auto no-scrollbar"
+                    className="bg-[#1C1D21]/95 backdrop-blur-md border border-white/10 shadow-2xl rounded-2xl p-3 flex flex-col gap-3 pointer-events-auto min-h-0 max-h-[58%] overflow-y-auto no-scrollbar"
                 >
                     <h3 className="text-white text-xs font-semibold opacity-90 pb-1.5 border-b border-white/10">Base Global Parameters</h3>
 
@@ -807,6 +809,15 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
 
                             {globalSettings.enableVerticalBackground && (
                                 <div className="space-y-3 pl-2 border-l-2 border-white/10">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={!!globalSettings.bgLinesCreateTubes}
+                                            onChange={e => setGlobalSettings((s: any) => ({ ...s, bgLinesCreateTubes: e.target.checked }))}
+                                            className="rounded border-gray-600 bg-gray-700 text-indigo-500 focus:ring-indigo-500"
+                                        />
+                                        <span className="text-white text-[11px] font-medium opacity-90">Generate 3D tubes for straight lines</span>
+                                    </label>
                                     <div className="space-y-1">
                                         <div className="flex justify-between text-[10px]">
                                             <span className="text-gray-300">Rotation</span>
@@ -860,7 +871,7 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                     onMouseEnter={() => { isOverPanel.current = true; }}
                     onMouseLeave={() => { isOverPanel.current = false; }}
                     onWheel={e => e.stopPropagation()}
-                    className="bg-[#1C1D21]/95 backdrop-blur-md border border-white/10 shadow-2xl rounded-2xl p-3 flex flex-col gap-3 pointer-events-auto max-h-[40vh] overflow-y-auto no-scrollbar"
+                    className="bg-[#1C1D21]/95 backdrop-blur-md border border-white/10 shadow-2xl rounded-2xl p-3 flex flex-col gap-3 pointer-events-auto min-h-0 flex-1 overflow-hidden"
                 >
                     <h4 className="text-[10px] text-gray-400 font-bold uppercase tracking-wider px-1">Pattern Management</h4>
                     
@@ -895,28 +906,30 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                     </div>
 
                     {savedPatterns.length > 0 && (
-                        <div className="space-y-1.5 mt-2">
+                        <div className="space-y-1.5 mt-2 min-h-0 flex-1 flex flex-col">
                             <div className="flex items-center gap-1.5 px-1 text-gray-500 text-[9px] font-semibold uppercase tracking-widest">
                                 <FolderOpen className="w-3 h-3" />
                                 Saved Patterns
                             </div>
-                            <div className="grid grid-cols-1 gap-1.5">
-                                {savedPatterns.map(p => (
-                                    <div key={p.id} className="group relative flex items-center justify-between gap-2 p-2 bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/5">
-                                        <button 
-                                            onClick={() => loadPattern(p)}
-                                            className="flex-1 text-left text-gray-300 text-[10px] font-medium truncate pr-6"
-                                        >
-                                            {p.name}
-                                        </button>
-                                        <button 
-                                            onClick={(e) => { e.stopPropagation(); deletePattern(p.id); }}
-                                            className="absolute right-1 opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 text-gray-500 transition-all"
-                                        >
-                                            <Trash2 className="w-3 h-3" />
-                                        </button>
-                                    </div>
-                                ))}
+                            <div className="min-h-0 overflow-y-auto overscroll-contain pr-1 no-scrollbar">
+                                <div className="grid grid-cols-1 gap-1.5">
+                                    {savedPatterns.map(p => (
+                                        <div key={p.id} className="group relative flex items-center justify-between gap-2 p-2 bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/5">
+                                            <button 
+                                                onClick={() => loadPattern(p)}
+                                                className="flex-1 text-left text-gray-300 text-[10px] font-medium truncate pr-6"
+                                            >
+                                                {p.name}
+                                            </button>
+                                            <button 
+                                                onClick={(e) => { e.stopPropagation(); deletePattern(p.id); }}
+                                                className="absolute right-1 opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 text-gray-500 transition-all"
+                                            >
+                                                <Trash2 className="w-3 h-3" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
                             </div>
                         </div>
                     )}

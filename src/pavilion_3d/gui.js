@@ -12,8 +12,10 @@ export function setupGUI(params, callbacks) {
     onExportSTL,
     onImportModel,
     onImportSecondaryModel,
+    onImportGlassGeometry,
     onClearImportedGeometry,
     onClearSecondaryImportedGeometry,
+    onClearGlassGeometry,
     onRepairImportedGeometry
   } = callbacks;
 
@@ -70,6 +72,15 @@ export function setupGUI(params, callbacks) {
   struct.add(params, 'ribDirection', ['meridional', 'parallel', 'diagonal']).name('Rib Direction').onChange(onParamChange);
   struct.add(params, 'columnCount', 0, 12, 1).name('Columns').onChange(onParamChange);
   struct.add(params, 'columnBranching', 1, 6, 1).name('Column Branches').onChange(onParamChange);
+  struct.add(params, 'glassSystemEnabled').name('Glass Frame Mode').onChange(onParamChange);
+  struct.add(params, 'glassFrameMode', ['grid', 'hybrid', 'boundary']).name('Glass Edge Mode').onChange(onParamChange);
+  struct.add(params, 'glassFrameRadius', 0.01, 0.6, 0.01).name('Glass Tube Radius').onChange(onParamChange);
+  struct.add(params, 'glassSharpAngle', 1, 60, 1).name('Sharp Edge Angle').onChange(onParamChange);
+  struct.add(params, 'glassGridU', 1, 24, 1).name('Glass Grid U').onChange(onParamChange);
+  struct.add(params, 'glassGridV', 1, 24, 1).name('Glass Grid V').onChange(onParamChange);
+  struct.addColor(params, 'glassFrameColor').name('Glass Frame Color').onChange(onParamChange);
+  struct.addColor(params, 'glassPanelColor').name('Glass Panel Color').onChange(onParamChange);
+  struct.add(params, 'glassPanelOpacity', 0.02, 0.9, 0.01).name('Glass Opacity').onChange(onParamChange);
   struct.close();
 
   // Skin / Facade
@@ -183,6 +194,11 @@ export function setupGUI(params, callbacks) {
         onImportSecondaryModel();
       }
     },
+    importGlass() {
+      if (onImportGlassGeometry) {
+        onImportGlassGeometry();
+      }
+    },
     repair() {
       if (params._importedGeometry && onRepairImportedGeometry) {
         onRepairImportedGeometry();
@@ -195,6 +211,7 @@ export function setupGUI(params, callbacks) {
         params.importMode = false;
         params._importedGeometry = null;
         params._secondaryImportedGeometry = null;
+        params._glassGeometry = null;
         onParamChange();
       }
       gui.controllersRecursive().forEach(c => c.updateDisplay());
@@ -208,12 +225,22 @@ export function setupGUI(params, callbacks) {
       }
       gui.controllersRecursive().forEach(c => c.updateDisplay());
     },
+    clearGlass() {
+      if (onClearGlassGeometry) {
+        onClearGlassGeometry();
+      } else {
+        params._glassGeometry = null;
+        onParamChange();
+      }
+      gui.controllersRecursive().forEach(c => c.updateDisplay());
+    },
   };
   imp.add(importActions, 'import').name('📂 Import OBJ / STL');
   imp.add(importActions, 'repair').name('Repair / Make Solid');
   imp.add(importActions, 'importSecond').name('Import Second OBJ / STL');
+  imp.add(importActions, 'importGlass').name('Import Glass Geometry');
   imp.add(params, 'importUVMethod', ['original', 'smart', 'planar', 'box', 'spherical', 'cylindrical']).name('UV Method').onChange(async () => {
-    const geometries = [params._importedGeometry, params._secondaryImportedGeometry].filter(Boolean);
+    const geometries = [params._importedGeometry, params._secondaryImportedGeometry, params._glassGeometry].filter(Boolean);
     if (geometries.length === 0) return;
 
     const { applyUVMethod } = await import('./utils/importModel.js');
@@ -227,6 +254,7 @@ export function setupGUI(params, callbacks) {
   imp.add(params, 'importShowUVCheck').name('🔲 UV Check Texture').onChange(onParamChange);
   imp.add(importActions, 'clear').name('🗑️ Clear Import');
   imp.add(importActions, 'clearSecond').name('Clear Second Import');
+  imp.add(importActions, 'clearGlass').name('Clear Glass Import');
   imp.close();
 
   // Export

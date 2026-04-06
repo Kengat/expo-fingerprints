@@ -121,7 +121,8 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
 
             const applySharedImportedGeometryLayout = async (
                 nextPrimaryRaw?: THREE.BufferGeometry | null,
-                nextSecondaryRaw?: THREE.BufferGeometry | null
+                nextSecondaryRaw?: THREE.BufferGeometry | null,
+                nextGlassRaw?: THREE.BufferGeometry | null
             ) => {
                 const primaryRaw = nextPrimaryRaw === undefined
                     ? (localParams._importedGeometry ? denormalizeImportedGeometry(localParams._importedGeometry) : null)
@@ -129,18 +130,26 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                 const secondaryRaw = nextSecondaryRaw === undefined
                     ? (localParams._secondaryImportedGeometry ? denormalizeImportedGeometry(localParams._secondaryImportedGeometry) : null)
                     : nextSecondaryRaw;
+                const glassRaw = nextGlassRaw === undefined
+                    ? (localParams._glassGeometry ? denormalizeImportedGeometry(localParams._glassGeometry) : null)
+                    : nextGlassRaw;
 
-                if (!primaryRaw) {
-                    localParams.importMode = false;
+                const sources = [primaryRaw, secondaryRaw, glassRaw].filter(Boolean) as THREE.BufferGeometry[];
+                if (sources.length === 0) {
                     localParams._importedGeometry = null;
                     localParams._secondaryImportedGeometry = null;
+                    localParams._glassGeometry = null;
+                    localParams.importMode = false;
                     clearImportedBakeCaches();
                     rebuildScene();
                     return;
                 }
 
-                const sources = secondaryRaw ? [primaryRaw, secondaryRaw] : [primaryRaw];
-                const [normalizedPrimary, normalizedSecondary] = normalizeImportedGeometries(sources, 15);
+                const normalizedGeometries = normalizeImportedGeometries(sources, 15);
+                let normalizedIndex = 0;
+                const normalizedPrimary = primaryRaw ? normalizedGeometries[normalizedIndex++] : null;
+                const normalizedSecondary = secondaryRaw ? normalizedGeometries[normalizedIndex++] : null;
+                const normalizedGlass = glassRaw ? normalizedGeometries[normalizedIndex++] : null;
 
                 if (normalizedPrimary) {
                     await applyUVMethod(normalizedPrimary, localParams.importUVMethod);
@@ -150,9 +159,14 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                     await applyUVMethod(normalizedSecondary, localParams.importUVMethod);
                     normalizedSecondary.computeVertexNormals();
                 }
+                if (normalizedGlass) {
+                    await applyUVMethod(normalizedGlass, localParams.importUVMethod);
+                    normalizedGlass.computeVertexNormals();
+                }
 
                 localParams._importedGeometry = normalizedPrimary ?? null;
                 localParams._secondaryImportedGeometry = normalizedSecondary ?? null;
+                localParams._glassGeometry = normalizedGlass ?? null;
                 localParams.importMode = !!normalizedPrimary;
                 clearImportedBakeCaches();
                 rebuildScene();
@@ -205,6 +219,15 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                         }
                     }, { normalize: false });
                 },
+                onImportGlassGeometry: () => {
+                    importModelFile(localParams.importUVMethod, async (geometry: any) => {
+                        localParams.glassSystemEnabled = true;
+                        await applySharedImportedGeometryLayout(undefined, undefined, geometry);
+                        if (guiObj) {
+                            guiObj.controllersRecursive().forEach((c: any) => c.updateDisplay());
+                        }
+                    }, { normalize: false });
+                },
                 onRepairImportedGeometry: async () => {
                     if (!localParams._importedGeometry) return;
                     const repairedPrimary = repairImportedGeometry(
@@ -213,16 +236,22 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                     const secondaryRaw = localParams._secondaryImportedGeometry
                         ? denormalizeImportedGeometry(localParams._secondaryImportedGeometry)
                         : null;
-                    await applySharedImportedGeometryLayout(repairedPrimary, secondaryRaw);
+                    const glassRaw = localParams._glassGeometry
+                        ? denormalizeImportedGeometry(localParams._glassGeometry)
+                        : null;
+                    await applySharedImportedGeometryLayout(repairedPrimary, secondaryRaw, glassRaw);
                     if (guiObj) {
                         guiObj.controllersRecursive().forEach((c: any) => c.updateDisplay());
                     }
                 },
                 onClearImportedGeometry: async () => {
-                    await applySharedImportedGeometryLayout(null, null);
+                    await applySharedImportedGeometryLayout(null, null, null);
                 },
                 onClearSecondaryImportedGeometry: async () => {
-                    await applySharedImportedGeometryLayout(undefined, null);
+                    await applySharedImportedGeometryLayout(undefined, null, undefined);
+                },
+                onClearGlassGeometry: async () => {
+                    await applySharedImportedGeometryLayout(undefined, undefined, null);
                 },
             });
 

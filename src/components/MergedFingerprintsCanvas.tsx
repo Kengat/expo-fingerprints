@@ -786,6 +786,7 @@ export function collectStreamlines(
     globalSettings: any = null,
 ): Streamline[] {
     const streamlines: Streamline[] = [];
+    const includeBackgroundTubes = globalSettings?.bgLinesCreateTubes ?? false;
 
     const isCulledByAny = (gx: number, gy: number, customOffset: number = cullingOffset, startLayer: number = 0) => {
         for (let aboveIndex = startLayer; aboveIndex < items.length; aboveIndex++) {
@@ -796,7 +797,7 @@ export function collectStreamlines(
         return false;
     };
 
-    if (globalSettings?.enableVerticalBackground) {
+    if (globalSettings?.enableVerticalBackground && includeBackgroundTubes) {
         const gs = globalSettings.globalScale || 1.0;
         const bgRotation = globalSettings.bgRotation ?? 0;
         const bgLineDensity = (globalSettings.bgLineDensity ?? 31.0) / gs;

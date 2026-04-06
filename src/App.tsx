@@ -68,6 +68,7 @@ function loadInitialGlobalSettings() {
     lineThicknessScale: 1.0,
     noiseScale: 7,
     globalScale: 1.0,
+    bgLinesCreateTubes: false,
   };
 }
 
@@ -218,22 +219,28 @@ export default function App() {
 
     let importedGeomJson = null;
     let secondaryImportedGeomJson = null;
+    let glassGeomJson = null;
     if (exportParams._importedGeometry) {
       importedGeomJson = exportParams._importedGeometry.toJSON();
     }
     if (exportParams._secondaryImportedGeometry) {
       secondaryImportedGeomJson = exportParams._secondaryImportedGeometry.toJSON();
     }
+    if (exportParams._glassGeometry) {
+      glassGeomJson = exportParams._glassGeometry.toJSON();
+    }
     delete exportParams._importedGeometry;
     delete exportParams._secondaryImportedGeometry;
+    delete exportParams._glassGeometry;
 
     const projectData = {
-      version: 2,
+      version: 3,
       items,
       globalSettings,
       params: exportParams,
       importedGeomJson,
-      secondaryImportedGeomJson
+      secondaryImportedGeomJson,
+      glassGeomJson
     };
 
     const blob = new Blob([JSON.stringify(projectData)], { type: 'application/json' });
@@ -278,11 +285,21 @@ export default function App() {
           } else {
             engine.params._secondaryImportedGeometry = null;
           }
+          if (data.glassGeomJson) {
+            const loader = new THREE.BufferGeometryLoader();
+            engine.params._glassGeometry = loader.parse(data.glassGeomJson);
+          } else {
+            engine.params._glassGeometry = null;
+          }
 
           // Trigger GUI update and rebuild
           if (engine.guiObj) {
             engine.guiObj.controllersRecursive().forEach((c: any) => c.updateDisplay());
           }
+
+          const g = buildPavilion(engine.scene, engine.params);
+          setBaseGeometry(g.userData.baseGeometry ?? null);
+          setSecondaryGeometry(g.userData.secondaryGeometry ?? null);
           
           // Force a re-render/re-bake
           const { canvas, circles, lines } = generateTextureAndData(data.items || items, data.globalSettings || globalSettings);

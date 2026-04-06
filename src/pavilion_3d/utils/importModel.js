@@ -2,12 +2,24 @@ import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import xatlasWasmUrl from 'xatlasjs/dist/xatlas.wasm?url';
+import xatlasWorkerUrl from 'xatlasjs/dist/xatlas.js?url';
 
 // ---------------------------------------------------------------------------
 // UV Checker Texture — colorful numbered grid for debugging UV mapping
 // ---------------------------------------------------------------------------
 
 let _cachedCheckerTexture = null;
+const _originalGeometryStates = new WeakMap();
+let _smartUvUnwrapperPromise = null;
+
+function toAbsoluteAssetUrl(url) {
+    if (!url) return url;
+    if (/^(?:[a-z]+:)?\/\//i.test(url) || url.startsWith('blob:') || url.startsWith('data:')) {
+        return url;
+    }
+    return new URL(url, window.location.href).href;
+}
 
 /**
  * Generates a colorful UV checker texture with numbered cells.
@@ -105,6 +117,134 @@ function shadeColor(hex, percent) {
     const g = Math.min(255, ((num >> 8) & 0x00FF) + percent);
     const b = Math.min(255, (num & 0x0000FF) + percent);
     return `rgb(${r},${g},${b})`;
+}
+
+function cloneGeometryState(geometry) {
+    const attributes = {};
+    for (const [name, attribute] of Object.entries(geometry.attributes)) {
+        attributes[name] = attribute.clone();
+    }
+
+    return {
+        attributes,
+        index: geometry.index ? geometry.index.clone() : null,
+        groups: geometry.groups.map((group) => ({ ...group })),
+        drawRange: { ...geometry.drawRange },
+    };
+}
+
+function applyGeometryState(geometry, state) {
+    for (const name of Object.keys(geometry.attributes)) {
+        if (!(name in state.attributes)) {
+            geometry.deleteAttribute(name);
+        }
+    }
+
+    for (const [name, attribute] of Object.entries(state.attributes)) {
+        geometry.setAttribute(name, attribute.clone());
+    }
+
+    geometry.setIndex(state.index ? state.index.clone() : null);
+    geometry.clearGroups();
+    for (const group of state.groups) {
+        geometry.addGroup(group.start, group.count, group.materialIndex);
+    }
+    geometry.setDrawRange(state.drawRange.start, state.drawRange.count);
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+}
+
+function createGeometryFromState(state) {
+    const geometry = new THREE.BufferGeometry();
+    applyGeometryState(geometry, state);
+    return geometry;
+}
+
+function ensureOriginalGeometryState(geometry) {
+    if (!_originalGeometryStates.has(geometry)) {
+        _originalGeometryStates.set(geometry, cloneGeometryState(geometry));
+    }
+    return _originalGeometryStates.get(geometry);
+}
+
+function getGeometryMaxDimension(geometry) {
+    geometry.computeBoundingBox();
+    const size = new THREE.Vector3();
+    geometry.boundingBox?.getSize(size);
+    return Math.max(size.x, size.y, size.z, 1);
+}
+
+function buildSmartUvSourceGeometry(geometry) {
+    let source = clonePositionOnlyGeometry(geometry);
+    ensureIndexedGeometry(source);
+
+    const weldTolerance = Math.max(getGeometryMaxDimension(source) * 1e-6, 1e-6);
+    source = mergeVertices(source, weldTolerance);
+    source = removeDegenerateTriangles(source, (getGeometryMaxDimension(source) ** 2) * 1e-12);
+    source = removeDuplicateTriangles(source);
+    if (!source.index || source.index.count === 0) {
+        return source;
+    }
+    source = orientTrianglesConsistently(source);
+    source.computeVertexNormals();
+    source.computeBoundingBox();
+    source.computeBoundingSphere();
+    return source;
+}
+
+function getSmartUvOptions(geometry) {
+    const faceCount = geometry.index ? geometry.index.count / 3 : geometry.getAttribute('position').count / 3;
+    const resolution = 2048;
+    const padding = Math.max(4, Math.round(resolution / 512));
+
+    return {
+        chartOptions: {
+            fixWinding: true,
+            maxIterations: faceCount > 120000 ? 2 : 4,
+            maxCost: 3,
+            normalDeviationWeight: 2.5,
+            normalSeamWeight: 4.5,
+            roundnessWeight: 0.001,
+            straightnessWeight: 8,
+            textureSeamWeight: 0,
+            useInputMeshUvs: false,
+        },
+        packOptions: {
+            resolution,
+            padding,
+            bilinear: true,
+            blockAlign: true,
+            bruteForce: faceCount <= 40000,
+            createImage: false,
+            maxChartSize: 0,
+            rotateCharts: true,
+            rotateChartsToAxis: true,
+            texelsPerUnit: 0,
+        },
+    };
+}
+
+async function getSmartUvUnwrapper() {
+    if (!_smartUvUnwrapperPromise) {
+        _smartUvUnwrapperPromise = (async () => {
+            const { UVUnwrapper } = await import('xatlas-three');
+            const unwrapper = new UVUnwrapper({ BufferAttribute: THREE.BufferAttribute });
+            unwrapper.useNormals = true;
+            const wasmUrl = toAbsoluteAssetUrl(xatlasWasmUrl);
+            const workerUrl = toAbsoluteAssetUrl(xatlasWorkerUrl);
+            await unwrapper.loadLibrary(
+                (mode, progress) => { console.log(`[SmartUV] ${mode}: ${progress}%`); },
+                wasmUrl,
+                workerUrl
+            );
+            return unwrapper;
+        })().catch((error) => {
+            _smartUvUnwrapperPromise = null;
+            throw error;
+        });
+    }
+
+    return _smartUvUnwrapperPromise;
 }
 
 
@@ -283,42 +423,35 @@ function generatePlanarUV(geometry) {
 
 export async function applyUVMethod(geometry, method) {
     if (method === 'smart') {
-        const { UVUnwrapper } = await import('xatlas-three');
-        const unwrapper = new UVUnwrapper({ BufferAttribute: THREE.BufferAttribute });
-
-        // Prevent random rotation of charts so directional patterns stay upright globally
-        unwrapper.packOptions = {
-            resolution: 2048,
-            rotateCharts: false,
-            rotateChartsToAxis: false,
-            padding: 2,
-            maxChartSize: 0,
-            blockAlign: false,
-            bruteForce: false,
-            createImage: false
-        };
-
-        // Load the WASM library via CDN for Vite compatibility
-        await unwrapper.loadLibrary(
-            (mode, progress) => { console.log(`[SmartUV] ${mode}: ${progress}%`); },
-            'https://cdn.jsdelivr.net/npm/xatlasjs@0.2.0/dist/xatlas.wasm',
-            'https://cdn.jsdelivr.net/npm/xatlasjs@0.2.0/dist/xatlas.js'
-        );
+        const originalState = ensureOriginalGeometryState(geometry);
+        const unwrapper = await getSmartUvUnwrapper();
+        const sourceGeometry = createGeometryFromState(originalState);
+        const workingGeometry = buildSmartUvSourceGeometry(sourceGeometry);
+        if (!workingGeometry.index || workingGeometry.index.count === 0) {
+            console.warn('[SmartUV] Geometry has no valid faces after cleanup, falling back to box UV mapping');
+            applyGeometryState(geometry, originalState);
+            generateBoxUV(geometry);
+            return;
+        }
+        const { chartOptions, packOptions } = getSmartUvOptions(workingGeometry);
+        unwrapper.chartOptions = chartOptions;
+        unwrapper.packOptions = packOptions;
 
         console.log('[SmartUV] Unwrapping geometry...');
         const savedImportTransform = geometry.userData.importTransform;
-        await unwrapper.unwrapGeometry(geometry);
+        await unwrapper.unwrapGeometry(workingGeometry);
+        applyGeometryState(geometry, cloneGeometryState(workingGeometry));
         if (savedImportTransform) geometry.userData.importTransform = savedImportTransform;
         console.log('[SmartUV] UV unwrapping complete.');
-
-        if (geometry.attributes.uv) {
-            geometry.userData.originalUVs = geometry.attributes.uv.clone();
-        }
         return;
     }
 
+    const originalState = _originalGeometryStates.get(geometry);
+
     if (method === 'original') {
-        if (geometry.userData.originalUVs && geometry.userData.originalUVs.count === geometry.attributes.position.count) {
+        if (originalState) {
+            applyGeometryState(geometry, originalState);
+        } else if (geometry.userData.originalUVs && geometry.userData.originalUVs.count === geometry.attributes.position.count) {
             geometry.setAttribute('uv', geometry.userData.originalUVs.clone());
         } else if (!geometry.attributes.uv) {
             console.warn('[Import] No original UVs found, falling back to box UV mapping');
@@ -327,6 +460,10 @@ export async function applyUVMethod(geometry, method) {
             console.warn('[Import] Original UVs no longer match repaired topology, keeping current UVs');
         }
         return;
+    }
+
+    if (originalState) {
+        applyGeometryState(geometry, originalState);
     }
 
     switch (method) {

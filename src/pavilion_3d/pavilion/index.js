@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { createShellGeometry, getShellFunction, stitchGeometrySeam, thickenGeometry, thickenGeometryGeneric } from './shell.js';
 import { applyDeformations } from './deform.js';
-import { createRibs, createColumns } from './structure.js';
+import { createRibs, createColumns, createGlassFrameSystem } from './structure.js';
 import { applySkin } from './skin.js';
 import { createScatter } from './scatter.js';
 import { createFabricDrape } from './fabric.js';
@@ -1292,11 +1292,13 @@ function buildSinglePavilion(p) {
 
   let shellGeom;
   let secondaryGeom = null;
+  let glassGeom = null;
 
   if (p.importMode && p._importedGeometry) {
     // Use imported model geometry instead of parametric shell
     shellGeom = p._importedGeometry.clone();
     secondaryGeom = p._secondaryImportedGeometry ? p._secondaryImportedGeometry.clone() : null;
+    glassGeom = p._glassGeometry ? p._glassGeometry.clone() : null;
 
     // Apply import scale
     if (p.importScale !== 1.0) {
@@ -1305,16 +1307,23 @@ function buildSinglePavilion(p) {
       if (secondaryGeom) {
         secondaryGeom.scale(s, s, s);
       }
+      if (glassGeom) {
+        glassGeom.scale(s, s, s);
+      }
     }
 
     shellGeom.computeVertexNormals();
     if (secondaryGeom) {
       secondaryGeom.computeVertexNormals();
     }
+    if (glassGeom) {
+      glassGeom.computeVertexNormals();
+    }
 
     // Save base geometry for UV distortion map (before thickening)
     pavilionGroup.userData.baseGeometry = shellGeom.clone();
     pavilionGroup.userData.secondaryGeometry = secondaryGeom ? secondaryGeom.clone() : null;
+    pavilionGroup.userData.glassGeometry = glassGeom ? glassGeom.clone() : null;
 
     // Thicken into solid manifold if CSG bake is needed
     // Use generic thickener (not grid-based) for arbitrary imported meshes
@@ -1345,6 +1354,14 @@ function buildSinglePavilion(p) {
     // Save base geometry for UV distortion map (before thickening)
     pavilionGroup.userData.baseGeometry = shellGeom.clone();
     pavilionGroup.userData.secondaryGeometry = null;
+    glassGeom = p._glassGeometry ? p._glassGeometry.clone() : null;
+    if (glassGeom && p.importScale !== 1.0) {
+      glassGeom.scale(p.importScale, p.importScale, p.importScale);
+    }
+    if (glassGeom) {
+      glassGeom.computeVertexNormals();
+    }
+    pavilionGroup.userData.glassGeometry = glassGeom ? glassGeom.clone() : null;
 
     // 5. Thicken it into a solid manifold (if needed for CSG)
     if (thickness > 0) {
@@ -1803,6 +1820,9 @@ function buildSinglePavilion(p) {
   const columns = createColumns(shellFunc, p, structMaterial);
   if (columns) pavilionGroup.add(columns);
 
+  const glassFrameSystem = createGlassFrameSystem(glassGeom, p);
+  if (glassFrameSystem) pavilionGroup.add(glassFrameSystem);
+
   const scatter = createScatter(shellGeom, p);
   if (scatter) pavilionGroup.add(scatter);
 
@@ -1933,6 +1953,7 @@ export function buildPavilion(scene, p) {
   rootGroup.userData.bakePromise = singlePavilion.userData.bakePromise || Promise.resolve();
   rootGroup.userData.baseGeometry = singlePavilion.userData.baseGeometry;
   rootGroup.userData.secondaryGeometry = singlePavilion.userData.secondaryGeometry ?? null;
+  rootGroup.userData.glassGeometry = singlePavilion.userData.glassGeometry ?? null;
 
   scene.add(rootGroup);
   return rootGroup;
