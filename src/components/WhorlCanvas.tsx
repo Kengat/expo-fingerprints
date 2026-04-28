@@ -13,6 +13,9 @@ type DragAction =
     | { type: 'move', id: string, startX: number, startY: number, itemStartX: number, itemStartY: number }
     | { type: 'rotate', id: string, startAngle: number, itemStartRotation: number, centerX: number, centerY: number }
     | { type: 'scale', id: string, startDist: number, itemStartScale: number, centerX: number, centerY: number }
+    | { type: 'stretchX', startX: number, startStretchX: number, dir: 1 | -1 }
+    | { type: 'stretchY', startY: number, startStretchY: number, dir: 1 | -1 }
+    | { type: 'stretchXY', startX: number, startY: number, startStretchX: number, startStretchY: number, dirX: 1 | -1, dirY: 1 | -1 }
     | null;
 
 const LOCAL_DEFAULT_DOTS_PARAMS: FingerprintParams = {
@@ -69,10 +72,10 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
     const [selectedId, setSelectedId] = useState<string | null>(items[0]?.id || null);
     const [view, setView] = useState(() => {
         const initialZoom = Math.min(window.innerWidth, window.innerHeight) / UV_SIZE * 0.8;
-        return { 
-            x: window.innerWidth / 2 - (UV_SIZE / 2) * initialZoom, 
-            y: window.innerHeight / 2 - (UV_SIZE / 2) * initialZoom, 
-            zoom: initialZoom 
+        return {
+            x: window.innerWidth / 2 - (UV_SIZE / 2) * initialZoom,
+            y: window.innerHeight / 2 - (UV_SIZE / 2) * initialZoom,
+            zoom: initialZoom
         };
     });
     const [dragAction, setDragAction] = useState<DragAction>(null);
@@ -99,6 +102,8 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
             noiseScale: 7,
             globalScale: 1.0,
             bgLinesCreateTubes: false,
+            canvasStretchX: 1.0,
+            canvasStretchY: 1.0,
         };
     });
     const globalSettings = externalGlobalSettings ?? internalGlobalSettings;
@@ -111,6 +116,7 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
 
     const [isSaving, setIsSaving] = useState(false);
     const [saveName, setSaveName] = useState('');
+    const [isEditingCanvas, setIsEditingCanvas] = useState(false);
 
     // Persistence Effect
     useEffect(() => {
@@ -169,6 +175,8 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
             noiseScale: 7,
             globalScale: 1.0,
             bgLinesCreateTubes: false,
+            canvasStretchX: 1.0,
+            canvasStretchY: 1.0,
         });
         setSelectedId('initial');
     };
@@ -214,6 +222,28 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
             setItems(items.map(it => {
                 if (it.id !== dragAction.id) return it;
                 return { ...it, scale: Math.max(0.1, dragAction.itemStartScale * scaleFactor) };
+            }));
+        } else if (dragAction.type === 'stretchX') {
+            const pixelDelta = (e.clientX - dragAction.startX) * dragAction.dir;
+            const uvDelta = pixelDelta / view.zoom;
+            const newStretch = Math.max(0.2, Math.min(4.0, dragAction.startStretchX + uvDelta / UV_SIZE));
+            setGlobalSettings((s: any) => ({ ...s, canvasStretchX: parseFloat(newStretch.toFixed(3)) }));
+        } else if (dragAction.type === 'stretchY') {
+            const pixelDelta = (e.clientY - dragAction.startY) * dragAction.dir;
+            const uvDelta = pixelDelta / view.zoom;
+            const newStretch = Math.max(0.2, Math.min(4.0, dragAction.startStretchY + uvDelta / UV_SIZE));
+            setGlobalSettings((s: any) => ({ ...s, canvasStretchY: parseFloat(newStretch.toFixed(3)) }));
+        } else if (dragAction.type === 'stretchXY') {
+            const pixelDeltaX = (e.clientX - dragAction.startX) * dragAction.dirX;
+            const uvDeltaX = pixelDeltaX / view.zoom;
+            const newStretchX = Math.max(0.2, Math.min(4.0, dragAction.startStretchX + uvDeltaX / UV_SIZE));
+            const pixelDeltaY = (e.clientY - dragAction.startY) * dragAction.dirY;
+            const uvDeltaY = pixelDeltaY / view.zoom;
+            const newStretchY = Math.max(0.2, Math.min(4.0, dragAction.startStretchY + uvDeltaY / UV_SIZE));
+            setGlobalSettings((s: any) => ({
+                ...s,
+                canvasStretchX: parseFloat(newStretchX.toFixed(3)),
+                canvasStretchY: parseFloat(newStretchY.toFixed(3)),
             }));
         }
     };
@@ -271,52 +301,58 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
     // Draw UV boundaries
     useEffect(() => {
         const canvas = uvCanvasRef.current;
-        if (!canvas || !props.baseGeometry) return;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
+        const ctx = canvas?.getContext('2d');
+        if (!canvas || !ctx) return;
+
+        const stretchX = globalSettings.canvasStretchX ?? 1;
+        const stretchY = globalSettings.canvasStretchY ?? 1;
+        const UV_W = UV_SIZE * stretchX;
+        const UV_H = UV_SIZE * stretchY;
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        const uv = props.baseGeometry.getAttribute('uv');
-        const index = props.baseGeometry.getIndex();
-        if (!uv) return;
 
         ctx.save();
         ctx.translate(view.x, view.y);
         ctx.scale(view.zoom, view.zoom);
 
-        // Draw the 2048x2048 bounding box
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
-        ctx.lineWidth = 2 / view.zoom;
-        ctx.strokeRect(0, 0, UV_SIZE, UV_SIZE);
+        // Draw the stretched bounding box
+        ctx.strokeStyle = isEditingCanvas ? 'rgba(59,130,246,0.6)' : 'rgba(0, 0, 0, 0.2)';
+        ctx.lineWidth = (isEditingCanvas ? 3 : 2) / view.zoom;
+        ctx.strokeRect(0, 0, UV_W, UV_H);
 
-        // Draw the UV triangles
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.05)';
-        ctx.lineWidth = 1 / view.zoom;
-        
-        const triCount = index ? index.count / 3 : uv.count / 3;
-        
-        ctx.beginPath();
-        for (let t = 0; t < triCount; t++) {
-            const i0 = index ? index.getX(t * 3) : t * 3;
-            const i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1;
-            const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+        if (props.baseGeometry) {
+            // Draw the UV triangles (still mapped to [0,UV_SIZE] space — re-map to stretched)
+            const uv = props.baseGeometry.getAttribute('uv');
+            const index = props.baseGeometry.getIndex();
+            if (uv) {
+                ctx.strokeStyle = 'rgba(0, 0, 0, 0.05)';
+                ctx.lineWidth = 1 / view.zoom;
 
-            const u0 = uv.getX(i0) * UV_SIZE;
-            const v0 = (1 - uv.getY(i0)) * UV_SIZE;
-            const u1 = uv.getX(i1) * UV_SIZE;
-            const v1 = (1 - uv.getY(i1)) * UV_SIZE;
-            const u2 = uv.getX(i2) * UV_SIZE;
-            const v2 = (1 - uv.getY(i2)) * UV_SIZE;
+                const triCount = index ? index.count / 3 : uv.count / 3;
+                ctx.beginPath();
+                for (let t = 0; t < triCount; t++) {
+                    const i0 = index ? index.getX(t * 3) : t * 3;
+                    const i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1;
+                    const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
 
-            ctx.moveTo(u0, v0);
-            ctx.lineTo(u1, v1);
-            ctx.lineTo(u2, v2);
-            ctx.lineTo(u0, v0);
+                    const u0 = uv.getX(i0) * UV_W;
+                    const v0 = (1 - uv.getY(i0)) * UV_H;
+                    const u1 = uv.getX(i1) * UV_W;
+                    const v1 = (1 - uv.getY(i1)) * UV_H;
+                    const u2 = uv.getX(i2) * UV_W;
+                    const v2 = (1 - uv.getY(i2)) * UV_H;
+
+                    ctx.moveTo(u0, v0);
+                    ctx.lineTo(u1, v1);
+                    ctx.lineTo(u2, v2);
+                    ctx.lineTo(u0, v0);
+                }
+                ctx.stroke();
+            }
         }
-        ctx.stroke();
+
         ctx.restore();
-    }, [props.baseGeometry, view, dimensions]);
+    }, [props.baseGeometry, view, dimensions, globalSettings, isEditingCanvas]);
 
     // Explicitly stop wheel propagation from side panels to prevent zooming
     useEffect(() => {
@@ -430,6 +466,88 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                 className="absolute inset-0 pointer-events-none opacity-50 mix-blend-multiply z-0"
             />
 
+            {/* Canvas Stretch Drag Handles */}
+            {isEditingCanvas && (() => {
+                const stretchX = globalSettings.canvasStretchX ?? 1;
+                const stretchY = globalSettings.canvasStretchY ?? 1;
+                const UV_W = UV_SIZE * stretchX;
+                const UV_H = UV_SIZE * stretchY;
+                // Canvas corners in screen space
+                const x0 = view.x;
+                const y0 = view.y;
+                const x1 = view.x + UV_W * view.zoom;
+                const y1 = view.y + UV_H * view.zoom;
+                const xm = (x0 + x1) / 2;
+                const ym = (y0 + y1) / 2;
+                const HS = 10; // handle half-size in px
+
+                type HandleDef = { x: number; y: number; cursor: string; label: string; onDown: (e: React.PointerEvent) => void };
+                const handles: HandleDef[] = [
+                    // Corners
+                    {
+                        x: x0, y: y0, cursor: 'nwse-resize', label: 'TL',
+                        onDown: (e) => { e.stopPropagation(); setDragAction({ type: 'stretchXY', startX: e.clientX, startY: e.clientY, startStretchX: stretchX, startStretchY: stretchY, dirX: -1, dirY: -1 }); }
+                    },
+                    {
+                        x: x1, y: y0, cursor: 'nesw-resize', label: 'TR',
+                        onDown: (e) => { e.stopPropagation(); setDragAction({ type: 'stretchXY', startX: e.clientX, startY: e.clientY, startStretchX: stretchX, startStretchY: stretchY, dirX: 1, dirY: -1 }); }
+                    },
+                    {
+                        x: x0, y: y1, cursor: 'nesw-resize', label: 'BL',
+                        onDown: (e) => { e.stopPropagation(); setDragAction({ type: 'stretchXY', startX: e.clientX, startY: e.clientY, startStretchX: stretchX, startStretchY: stretchY, dirX: -1, dirY: 1 }); }
+                    },
+                    {
+                        x: x1, y: y1, cursor: 'nwse-resize', label: 'BR',
+                        onDown: (e) => { e.stopPropagation(); setDragAction({ type: 'stretchXY', startX: e.clientX, startY: e.clientY, startStretchX: stretchX, startStretchY: stretchY, dirX: 1, dirY: 1 }); }
+                    },
+                    // Edges
+                    {
+                        x: xm, y: y0, cursor: 'n-resize', label: 'T',
+                        onDown: (e) => { e.stopPropagation(); setDragAction({ type: 'stretchY', startY: e.clientY, startStretchY: stretchY, dir: -1 }); }
+                    },
+                    {
+                        x: xm, y: y1, cursor: 's-resize', label: 'B',
+                        onDown: (e) => { e.stopPropagation(); setDragAction({ type: 'stretchY', startY: e.clientY, startStretchY: stretchY, dir: 1 }); }
+                    },
+                    {
+                        x: x0, y: ym, cursor: 'w-resize', label: 'L',
+                        onDown: (e) => { e.stopPropagation(); setDragAction({ type: 'stretchX', startX: e.clientX, startStretchX: stretchX, dir: -1 }); }
+                    },
+                    {
+                        x: x1, y: ym, cursor: 'e-resize', label: 'R',
+                        onDown: (e) => { e.stopPropagation(); setDragAction({ type: 'stretchX', startX: e.clientX, startStretchX: stretchX, dir: 1 }); }
+                    },
+                ];
+
+                return (
+                    <div className="absolute inset-0 pointer-events-none z-20">
+                        {/* Stretch ratio label */}
+                        <div
+                            className="absolute bg-blue-600/90 text-white text-[10px] font-mono px-2 py-0.5 rounded-md pointer-events-none"
+                            style={{ left: xm, top: y0 - 22, transform: 'translateX(-50%)' }}
+                        >
+                            {stretchX.toFixed(2)}x : {stretchY.toFixed(2)}y
+                        </div>
+                        {handles.map(h => (
+                            <div
+                                key={h.label}
+                                className="absolute pointer-events-auto"
+                                style={{
+                                    left: h.x - HS,
+                                    top: h.y - HS,
+                                    width: HS * 2,
+                                    height: HS * 2,
+                                    cursor: h.cursor,
+                                }}
+                                onPointerDown={h.onDown}
+                            >
+                                <div className="w-full h-full rounded-full border-2 border-blue-400 bg-white shadow-lg hover:bg-blue-100 transition-colors" />
+                            </div>
+                        ))}
+                    </div>
+                );
+            })()}
+
             <div
                 className="absolute top-0 left-0 origin-top-left pointer-events-none z-10"
                 style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}
@@ -519,8 +637,14 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                         <Trash2 className="w-3 h-3" />
                         Delete
                     </button>
+                    <button
+                        onClick={() => setIsEditingCanvas(e => !e)}
+                        className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] uppercase tracking-wide font-bold transition-colors whitespace-nowrap ${isEditingCanvas ? 'bg-blue-600/60 text-blue-200 border border-blue-400/50' : 'bg-blue-600/20 hover:bg-blue-600/40 text-blue-400'}`}
+                    >
+                        Edit Canvas
+                    </button>
                     {selectedItem && (
-                        <button 
+                        <button
                             onClick={() => {
                                 if (!selectedItem.params.customPolygon) {
                                     const boundsX = selectedItem.params.boundsX ?? 0.7;
@@ -692,7 +816,7 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
             {/* Right Side Panels */}
             <div className="absolute top-4 right-4 bottom-4 flex flex-col gap-4 z-50 pointer-events-none w-[220px] min-h-0">
                 {/* Global Settings Panel */}
-                <div 
+                <div
                     onMouseEnter={() => { isOverPanel.current = true; }}
                     onMouseLeave={() => { isOverPanel.current = false; }}
                     onWheel={e => e.stopPropagation()}
@@ -798,9 +922,9 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                         {/* Background Settings */}
                         <div className="mt-3 pt-3 border-t border-white/10 space-y-3">
                             <label className="flex items-center gap-2 cursor-pointer">
-                                <input 
-                                    type="checkbox" 
-                                    checked={!!globalSettings.enableVerticalBackground} 
+                                <input
+                                    type="checkbox"
+                                    checked={!!globalSettings.enableVerticalBackground}
                                     onChange={e => setGlobalSettings((s: any) => ({ ...s, enableVerticalBackground: e.target.checked }))}
                                     className="rounded border-gray-600 bg-gray-700 text-blue-500 focus:ring-blue-500"
                                 />
@@ -867,20 +991,20 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                 </div>
 
                 {/* Pattern Management Panel */}
-                <div 
+                <div
                     onMouseEnter={() => { isOverPanel.current = true; }}
                     onMouseLeave={() => { isOverPanel.current = false; }}
                     onWheel={e => e.stopPropagation()}
                     className="bg-[#1C1D21]/95 backdrop-blur-md border border-white/10 shadow-2xl rounded-2xl p-3 flex flex-col gap-3 pointer-events-auto min-h-0 flex-1 overflow-hidden"
                 >
                     <h4 className="text-[10px] text-gray-400 font-bold uppercase tracking-wider px-1">Pattern Management</h4>
-                    
+
                     <div className="flex flex-col gap-2">
                         {isSaving ? (
                             <div className="flex flex-col gap-2 p-2 bg-blue-500/10 border border-blue-500/20 rounded-xl">
-                                <input 
-                                    type="text" 
-                                    placeholder="Pattern name..." 
+                                <input
+                                    type="text"
+                                    placeholder="Pattern name..."
                                     autoFocus
                                     value={saveName}
                                     onChange={e => setSaveName(e.target.value)}
@@ -898,7 +1022,7 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                                 Save Pattern
                             </button>
                         )}
-                        
+
                         <button onClick={resetToDefault} className="flex items-center justify-center gap-2 w-full bg-orange-600/10 hover:bg-orange-600/20 text-orange-400 py-2 rounded-xl text-[10px] font-bold uppercase tracking-wider transition-all border border-orange-500/20">
                             <RotateCcw className="w-3.5 h-3.5" />
                             Reset to Base
@@ -915,13 +1039,13 @@ export const WhorlCanvas = forwardRef((props: WhorlCanvasProps, ref) => {
                                 <div className="grid grid-cols-1 gap-1.5">
                                     {savedPatterns.map(p => (
                                         <div key={p.id} className="group relative flex items-center justify-between gap-2 p-2 bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/5">
-                                            <button 
+                                            <button
                                                 onClick={() => loadPattern(p)}
                                                 className="flex-1 text-left text-gray-300 text-[10px] font-medium truncate pr-6"
                                             >
                                                 {p.name}
                                             </button>
-                                            <button 
+                                            <button
                                                 onClick={(e) => { e.stopPropagation(); deletePattern(p.id); }}
                                                 className="absolute right-1 opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 text-gray-500 transition-all"
                                             >

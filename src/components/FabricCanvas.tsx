@@ -18,6 +18,10 @@ export interface FabricItem {
     waviness?: number;
     noiseFreq?: number;
     noiseOffset?: number;
+    // dashed lines config
+    isDashed?: boolean;
+    dashLength?: number;
+    gapLength?: number;
 }
 
 export interface Attractor {
@@ -146,7 +150,10 @@ const defaultFlowConfig = {
     angleAmp: 0.6, 
     seed: 123,
     rotation: 0,
-    attractors: [] as Attractor[]
+    attractors: [] as Attractor[],
+    isDashed: false,
+    dashLength: 5,
+    gapLength: 5
 };
 
 const generateFlowPolylines = (config: typeof defaultFlowConfig, bounds: number) => {
@@ -258,7 +265,10 @@ const generateFlowPolylines = (config: typeof defaultFlowConfig, bounds: number)
             newItems.push({
                 id: Math.random().toString(36).substr(2, 9),
                 type: 'polyline',
-                points
+                points,
+                isDashed: config.isDashed,
+                dashLength: config.dashLength,
+                gapLength: config.gapLength
             });
         }
     }
@@ -572,6 +582,12 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
                 return;
             }
             
+            if (flowConfig.isDashed) {
+                ctx.setLineDash([flowConfig.dashLength, flowConfig.gapLength]);
+            } else {
+                ctx.setLineDash([]);
+            }
+
             if (isSelected) {
                 ctx.strokeStyle = '#3b82f6';
                 ctx.lineWidth = 3 / view.zoom;
@@ -583,6 +599,9 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
                 ctx.lineWidth = 1.5 / view.zoom;
             }
             ctx.stroke();
+            
+            // Reset line dash for controls and helpers
+            ctx.setLineDash([]);
 
             // Draw controls if selected and bezier
             if (isSelected && item.type === 'bezier' && item.start && item.cp1 && item.cp2 && item.end) {
@@ -927,7 +946,7 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
                                         <span className="text-gray-400 font-medium">Density</span>
                                         <span className="font-mono text-gray-500">{flowConfig.density.toFixed(2)}</span>
                                     </div>
-                                    <input type="range" min="0.05" max="0.3" step="0.01" value={flowConfig.density} onChange={e => {
+                                    <input type="range" min="0.01" max="1.5" step="0.01" value={flowConfig.density} onChange={e => {
                                         const newConf = { ...flowConfig, density: parseFloat(e.target.value) };
                                         setFlowConfig(newConf);
                                         regenerateFlow(newConf);
@@ -943,6 +962,44 @@ export const FabricCanvas = forwardRef((props: FabricCanvasProps, ref) => {
                                         setFlowConfig(newConf);
                                         regenerateFlow(newConf);
                                     }} className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500" />
+                                </div>
+                                
+                                <div className="space-y-2 pt-2 mt-2 border-t border-white/10">
+                                    <label className="flex items-center gap-2 text-[9px] text-gray-400 font-medium cursor-pointer">
+                                        <input type="checkbox" checked={flowConfig.isDashed} onChange={e => {
+                                            const newConf = { ...flowConfig, isDashed: e.target.checked };
+                                            setFlowConfig(newConf);
+                                            setItems(items.map(it => ({ ...it, isDashed: newConf.isDashed, dashLength: newConf.dashLength, gapLength: newConf.gapLength })));
+                                        }} className="accent-purple-500 rounded-sm" />
+                                        Dashed Lines
+                                    </label>
+                                    
+                                    {flowConfig.isDashed && (
+                                        <div className="space-y-2 pl-4">
+                                            <div className="space-y-0.5">
+                                                <div className="flex justify-between text-[9px]">
+                                                    <span className="text-gray-400 font-medium">Dash Length</span>
+                                                    <span className="font-mono text-gray-500">{flowConfig.dashLength}</span>
+                                                </div>
+                                                <input type="range" min="0.1" max="50" step="0.1" value={flowConfig.dashLength} onChange={e => {
+                                                    const newConf = { ...flowConfig, dashLength: parseFloat(e.target.value) };
+                                                    setFlowConfig(newConf);
+                                                    setItems(items.map(it => ({ ...it, dashLength: newConf.dashLength })));
+                                                }} className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500" />
+                                            </div>
+                                            <div className="space-y-0.5">
+                                                <div className="flex justify-between text-[9px]">
+                                                    <span className="text-gray-400 font-medium">Gap Length</span>
+                                                    <span className="font-mono text-gray-500">{flowConfig.gapLength}</span>
+                                                </div>
+                                                <input type="range" min="0.1" max="50" step="0.1" value={flowConfig.gapLength} onChange={e => {
+                                                    const newConf = { ...flowConfig, gapLength: parseFloat(e.target.value) };
+                                                    setFlowConfig(newConf);
+                                                    setItems(items.map(it => ({ ...it, gapLength: newConf.gapLength })));
+                                                }} className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500" />
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                             <div className="flex-1 space-y-2.5">

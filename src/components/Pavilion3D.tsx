@@ -14,7 +14,9 @@ import {
     denormalizeImportedGeometry,
     normalizeImportedGeometries
 } from '../pavilion_3d/utils/importModel.js';
-import type { DotCircle, Streamline } from './MergedFingerprintsCanvas';
+import { getComputedItems } from './MergedFingerprintsCanvas';
+import type { DotCircle, Streamline, CanvasItem } from './MergedFingerprintsCanvas';
+import { generateStreamlines } from './FingerprintGenerator';
 
 interface Pavilion3DProps {
     fingerprintCanvas: HTMLCanvasElement | null;
@@ -24,12 +26,15 @@ interface Pavilion3DProps {
     showSolidCheck?: boolean;
     dotCircles?: DotCircle[];
     streamlines?: Streamline[];
+    fingerprintItems?: CanvasItem[];
+    globalSettings?: any;
     onBaseGeometryUpdate?: (geom: THREE.BufferGeometry | null) => void;
     onSecondaryGeometryUpdate?: (geom: THREE.BufferGeometry | null) => void;
     editing3D?: boolean;
     fabricEnabled?: boolean;
     fabricItems?: any[];
     metaballs?: any[];
+    onExtrusionPreviewAutoDisabled?: (reason: string) => void;
 }
 
 export interface Pavilion3DHandle {
@@ -43,12 +48,14 @@ export interface Pavilion3DHandle {
     } | null;
 }
 
-export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, bakeTubesTrigger = 0, previewTubesTrigger = 0, showSolidCheck = false, dotCircles = [], streamlines = [], onBaseGeometryUpdate, onSecondaryGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [], metaballs = [] }, ref) {
+export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function Pavilion3D({ fingerprintCanvas, bakeHolesTrigger = 0, bakeTubesTrigger = 0, previewTubesTrigger = 0, showSolidCheck = false, dotCircles = [], streamlines = [], fingerprintItems = [], globalSettings = {}, onBaseGeometryUpdate, onSecondaryGeometryUpdate, editing3D = false, fabricEnabled = false, fabricItems = [], metaballs = [], onExtrusionPreviewAutoDisabled }, ref) {
     const mountRef = useRef<HTMLDivElement>(null);
     const onBaseGeomRef = useRef(onBaseGeometryUpdate);
     onBaseGeomRef.current = onBaseGeometryUpdate;
     const onSecondaryGeomRef = useRef(onSecondaryGeometryUpdate);
     onSecondaryGeomRef.current = onSecondaryGeometryUpdate;
+    const onExtrusionPreviewAutoDisabledRef = useRef(onExtrusionPreviewAutoDisabled);
+    onExtrusionPreviewAutoDisabledRef.current = onExtrusionPreviewAutoDisabled;
     const engineRef = useRef<{
         renderer: THREE.WebGLRenderer;
         scene: THREE.Scene;
@@ -58,6 +65,463 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
         params: typeof defaultParams;
         guiObj: any;
     } | null>(null);
+    const nativeWrapGenerationRef = useRef(0);
+
+    function createFingerprintThreeTexture(source: HTMLCanvasElement, mode: string, materialColor: string) {
+        let canvas = source;
+
+        if (mode === 'paint') {
+            canvas = document.createElement('canvas');
+            canvas.width = source.width;
+            canvas.height = source.height;
+            const ctx = canvas.getContext('2d');
+            const srcCtx = source.getContext('2d');
+            if (ctx && srcCtx) {
+                const base = new THREE.Color(materialColor || '#c8a882');
+                const data = srcCtx.getImageData(0, 0, source.width, source.height);
+                const out = ctx.createImageData(source.width, source.height);
+                for (let i = 0; i < data.data.length; i += 4) {
+                    const brightness = (data.data[i] + data.data[i + 1] + data.data[i + 2]) / (255 * 3);
+                    const isPattern = brightness < 0.5;
+                    out.data[i] = isPattern ? 255 : Math.round(base.r * 255);
+                    out.data[i + 1] = isPattern ? 255 : Math.round(base.g * 255);
+                    out.data[i + 2] = isPattern ? 255 : Math.round(base.b * 255);
+                    out.data[i + 3] = 255;
+                }
+                ctx.putImageData(out, 0, 0);
+            }
+        }
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.flipY = true;
+        tex.needsUpdate = true;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.unpackAlignment = 1;
+        return tex;
+    }
+
+    function forEachLocalDotPlacement(
+        segment: Array<{ x: number; y: number }>,
+        spacing: number,
+        callback: (dot: { x: number; y: number; distAlong: number; segmentLength: number }) => void,
+    ) {
+        if (segment.length < 2 || spacing <= 1e-8) return;
+
+        const segmentLength = segment.reduce((sum, point, index) => {
+            if (index === 0) return 0;
+            const prev = segment[index - 1];
+            return sum + Math.hypot(point.x - prev.x, point.y - prev.y);
+        }, 0);
+
+        let distUntilNextDot = spacing / 2;
+        let distAtSegmentStart = 0;
+
+        for (let i = 1; i < segment.length; i++) {
+            const p1 = segment[i - 1];
+            const p2 = segment[i];
+            const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+            if (d <= 1e-8) continue;
+
+            while (distUntilNextDot <= d + 1e-8) {
+                const t = Math.max(0, Math.min(1, distUntilNextDot / d));
+                callback({
+                    x: p1.x + (p2.x - p1.x) * t,
+                    y: p1.y + (p2.y - p1.y) * t,
+                    distAlong: distAtSegmentStart + distUntilNextDot,
+                    segmentLength,
+                });
+                distUntilNextDot += spacing;
+            }
+
+            distAtSegmentStart += d;
+            distUntilNextDot -= d;
+        }
+    }
+
+    function isNearLocalSegmentEndpoint(
+        segment: Array<{ x: number; y: number }>,
+        dotX: number,
+        dotY: number,
+        forbiddenRadius: number,
+    ) {
+        if (segment.length < 2) return false;
+        const start = segment[0];
+        const end = segment[segment.length - 1];
+        const startDx = dotX - start.x;
+        const startDy = dotY - start.y;
+        const endDx = dotX - end.x;
+        const endDy = dotY - end.y;
+        const r2 = forbiddenRadius * forbiddenRadius;
+        return (startDx * startDx + startDy * startDy) <= r2 || (endDx * endDx + endDy * endDy) <= r2;
+    }
+
+    function createSurfaceDecalTexture(source: HTMLCanvasElement, item: CanvasItem, settings: any) {
+        const size = 512;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+
+        ctx.clearRect(0, 0, size, size);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = 'rgba(72, 72, 72, 0.72)';
+        ctx.fillStyle = 'rgba(38, 38, 38, 0.78)';
+
+        const lines = generateStreamlines(item.params, size, size, item.scale);
+
+        for (const line of lines) {
+            for (let i = 1; i < line.length; i++) {
+                const prev = line[i - 1];
+                const point = line[i];
+                ctx.beginPath();
+                ctx.moveTo(prev.x, prev.y);
+                ctx.lineTo(point.x, point.y);
+                ctx.lineWidth = Math.max(0.5, getItemLocalLineThickness(item, point.x, point.y));
+                ctx.stroke();
+            }
+        }
+
+        const dotSpacing = (item.params.dotSpacing ?? 18) / Math.max(item.scale, 1e-6);
+        for (const line of lines) {
+            if (line.length < 2 || dotSpacing <= 1e-6) continue;
+            forEachLocalDotPlacement(line, dotSpacing, ({ x: dotX, y: dotY }) => {
+                const baseRadius = getItemLocalDotRadius(item, dotX, dotY);
+                const lineRadius = getItemLocalLineThickness(item, dotX, dotY) / 2;
+                const endpointRadius = lineRadius + baseRadius * 0.1;
+                if (isNearLocalSegmentEndpoint(line, dotX, dotY, endpointRadius)) {
+                    return;
+                }
+                ctx.beginPath();
+                ctx.arc(dotX, dotY, Math.max(0.5, baseRadius), 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = THREE.ClampToEdgeWrapping;
+        tex.wrapT = THREE.ClampToEdgeWrapping;
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.LinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.flipY = true;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.needsUpdate = true;
+        return tex;
+    }
+
+    function createSurfaceDecals(source: HTMLCanvasElement) {
+        const settings: any = globalSettings || {};
+        const computedItems = getComputedItems(fingerprintItems, settings);
+        const gs = settings.globalScale || 1.0;
+        return computedItems
+            .filter((item) => item.surfaceAnchor)
+            .map((item) => {
+                const texture = createSurfaceDecalTexture(source, item, settings);
+                if (!texture || !item.surfaceAnchor) return null;
+                const decalSize = Math.max(0.5, 7.0 * item.scale * gs);
+                return {
+                    id: item.id,
+                    texture,
+                    position: item.surfaceAnchor.position,
+                    normal: item.surfaceAnchor.normal,
+                    faceIndex: item.surfaceAnchor.faceIndex,
+                    size: [decalSize, decalSize, Math.max(1.0, decalSize * 0.75)],
+                    rotation: item.rotation || 0,
+                    item,
+                };
+            })
+            .filter(Boolean);
+    }
+
+    function getItemLocalLineThickness(item: CanvasItem, lx: number, ly: number) {
+        const lineThicknessMin = item.params.lineThicknessMin ?? 3;
+        const lineThicknessMax = item.params.lineThicknessMax ?? 3;
+        const noiseScale = item.params.noiseScale ?? 10;
+        const scaledMin = lineThicknessMin / Math.max(item.scale, 1e-6);
+        const scaledMax = lineThicknessMax / Math.max(item.scale, 1e-6);
+        if (scaledMin === scaledMax) return scaledMin;
+        const nx = (lx / 512) * 2 - 1;
+        const ny = -((ly / 512) * 2 - 1);
+        let v = 0;
+        v += Math.sin(nx * noiseScale + item.params.seed + 10) * Math.cos(ny * noiseScale + item.params.seed + 10);
+        v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed + 10) * Math.cos(ny * (noiseScale * 2) + item.params.seed + 10);
+        v = (v + 1.5) / 3;
+        return scaledMin + v * (scaledMax - scaledMin);
+    }
+
+    function getItemLocalDotRadius(item: CanvasItem, lx: number, ly: number) {
+        const dotSizeMin = item.params.dotSizeMin ?? 1.5;
+        const dotSizeMax = item.params.dotSizeMax ?? 6.0;
+        const noiseScale = item.params.noiseScale ?? 10;
+        const scaledMin = dotSizeMin / Math.max(item.scale, 1e-6);
+        const scaledMax = dotSizeMax / Math.max(item.scale, 1e-6);
+        const nx = (lx / 512) * 2 - 1;
+        const ny = -((ly / 512) * 2 - 1);
+        let v = 0;
+        v += Math.sin(nx * noiseScale + item.params.seed) * Math.cos(ny * noiseScale + item.params.seed);
+        v += 0.5 * Math.sin(nx * (noiseScale * 2) - item.params.seed) * Math.cos(ny * (noiseScale * 2) + item.params.seed);
+        v = (v + 1.5) / 3;
+        return scaledMin + v * (scaledMax - scaledMin);
+    }
+
+    function mapNativeDecalUV(decal: any, u: number, v: number) {
+        const positions = decal.positions;
+        const uvs = decal.uvs;
+        const normals = decal.normals;
+        if (!Array.isArray(positions) || !Array.isArray(uvs)) return null;
+
+        for (let i = 0; i < positions.length; i += 9) {
+            const ti = (i / 3) * 2;
+            const u0 = uvs[ti], v0 = uvs[ti + 1];
+            const u1 = uvs[ti + 2], v1 = uvs[ti + 3];
+            const u2 = uvs[ti + 4], v2 = uvs[ti + 5];
+            const d00 = (u1 - u0) * (u1 - u0) + (v1 - v0) * (v1 - v0);
+            const d01 = (u1 - u0) * (u2 - u0) + (v1 - v0) * (v2 - v0);
+            const d11 = (u2 - u0) * (u2 - u0) + (v2 - v0) * (v2 - v0);
+            const d20 = (u - u0) * (u1 - u0) + (v - v0) * (v1 - v0);
+            const d21 = (u - u0) * (u2 - u0) + (v - v0) * (v2 - v0);
+            const denom = d00 * d11 - d01 * d01;
+            if (Math.abs(denom) < 1e-10) continue;
+            const b = (d11 * d20 - d01 * d21) / denom;
+            const c = (d00 * d21 - d01 * d20) / denom;
+            const a = 1 - b - c;
+            if (a < -0.001 || b < -0.001 || c < -0.001) continue;
+
+            const p0 = new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2]);
+            const p1 = new THREE.Vector3(positions[i + 3], positions[i + 4], positions[i + 5]);
+            const p2 = new THREE.Vector3(positions[i + 6], positions[i + 7], positions[i + 8]);
+            const position = p0.multiplyScalar(a).addScaledVector(p1, b).addScaledVector(p2, c);
+
+            let normal: THREE.Vector3;
+            if (Array.isArray(normals) && normals.length === positions.length) {
+                const n0 = new THREE.Vector3(normals[i], normals[i + 1], normals[i + 2]);
+                const n1 = new THREE.Vector3(normals[i + 3], normals[i + 4], normals[i + 5]);
+                const n2 = new THREE.Vector3(normals[i + 6], normals[i + 7], normals[i + 8]);
+                normal = n0.multiplyScalar(a).addScaledVector(n1, b).addScaledVector(n2, c).normalize();
+            } else {
+                normal = new THREE.Vector3().subVectors(p1, p0).cross(new THREE.Vector3().subVectors(p2, p0)).normalize();
+            }
+            return { position, normal };
+        }
+
+        return null;
+    }
+
+    function nativeTextureV(localY: number) {
+        return 1 - localY / 512;
+    }
+
+    function buildNativeBakeData(sourceDecals: any[], nativeDecals: any[]) {
+        const nativeCircles: any[] = [];
+        const nativeLines: any[] = [];
+
+        for (const nativeDecal of nativeDecals) {
+            const sourceDecal = sourceDecals[nativeDecal.index];
+            const item = sourceDecal?.item as CanvasItem | undefined;
+            if (!item) continue;
+
+            const lines = generateStreamlines(item.params, 512, 512, item.scale);
+            const sizeX = Math.max(1e-6, Number(sourceDecal.size?.[0]) || 1);
+            const textureScaleToWorld = sizeX / Math.max(1, 512 * item.scale);
+
+            for (const line of lines) {
+                let currentLine: any[] = [];
+                for (const point of line) {
+                    const u = point.x / 512;
+                    const v = nativeTextureV(point.y);
+                    const mapped = mapNativeDecalUV(nativeDecal, u, v);
+                    if (!mapped) {
+                        if (currentLine.length > 1) nativeLines.push(currentLine);
+                        currentLine = [];
+                        continue;
+                    }
+
+                    const lineThickness = getItemLocalLineThickness(item, point.x, point.y) * item.scale * textureScaleToWorld;
+                    currentLine.push({
+                        x: point.x,
+                        y: point.y,
+                        position: mapped.position.toArray(),
+                        normal: mapped.normal.toArray(),
+                        thickness: lineThickness,
+                    });
+                }
+                if (currentLine.length > 1) nativeLines.push(currentLine);
+            }
+
+            const dotSpacing = (item.params.dotSpacing ?? 18) / Math.max(item.scale, 1e-6);
+            for (const line of lines) {
+                if (line.length < 2 || dotSpacing <= 1e-6) continue;
+
+                const visibleSegments: Array<Array<{ x: number; y: number }>> = [];
+                let currentSegment: Array<{ x: number; y: number }> = [];
+                for (const point of line) {
+                    const mapped = mapNativeDecalUV(nativeDecal, point.x / 512, nativeTextureV(point.y));
+                    if (mapped) {
+                        currentSegment.push({ x: point.x, y: point.y });
+                    } else {
+                        if (currentSegment.length > 1) visibleSegments.push(currentSegment);
+                        currentSegment = [];
+                    }
+                }
+                if (currentSegment.length > 1) visibleSegments.push(currentSegment);
+
+                for (const segment of visibleSegments) {
+                    forEachLocalDotPlacement(segment, dotSpacing, ({ x: dotX, y: dotY }) => {
+                        const baseRadius = getItemLocalDotRadius(item, dotX, dotY);
+                        const lineRadius = getItemLocalLineThickness(item, dotX, dotY) / 2;
+                        const endpointRadius = lineRadius + baseRadius * 0.1;
+                        if (isNearLocalSegmentEndpoint(segment, dotX, dotY, endpointRadius)) {
+                            return;
+                        }
+
+                        const mapped = mapNativeDecalUV(nativeDecal, dotX / 512, nativeTextureV(dotY));
+                        if (!mapped) return;
+
+                        nativeCircles.push({
+                            position: mapped.position.toArray(),
+                            normal: mapped.normal.toArray(),
+                            r: baseRadius * item.scale * textureScaleToWorld,
+                            x: dotX,
+                            y: dotY,
+                        });
+                    });
+                }
+            }
+        }
+
+        return { nativeCircles, nativeLines };
+    }
+
+    function findSceneShellMesh(scene: THREE.Scene) {
+        let shellMesh: THREE.Mesh | null = null;
+        scene.traverse((child: any) => {
+            if (!shellMesh && child.name === 'pavilion-shell' && child.isMesh) {
+                shellMesh = child as THREE.Mesh;
+            }
+        });
+        return shellMesh;
+    }
+
+    function findSceneBaseGeometry(scene: THREE.Scene) {
+        let baseGeometry: THREE.BufferGeometry | null = null;
+        scene.traverse((child: any) => {
+            if (!baseGeometry && child.userData?.baseGeometry?.isBufferGeometry) {
+                baseGeometry = child.userData.baseGeometry as THREE.BufferGeometry;
+            }
+        });
+        return baseGeometry;
+    }
+
+    function serializeGeometryForNativeWrap(geometry: THREE.BufferGeometry) {
+        const position = geometry.getAttribute('position');
+        if (!position) return null;
+
+        const vertices: number[] = [];
+        for (let i = 0; i < position.count; i++) {
+            vertices.push(position.getX(i), position.getY(i), position.getZ(i));
+        }
+
+        const indices: number[] = [];
+        const index = geometry.getIndex();
+        if (index) {
+            for (let i = 0; i < index.count; i++) indices.push(index.getX(i));
+        } else {
+            for (let i = 0; i < position.count; i++) indices.push(i);
+        }
+
+        return { vertices, indices };
+    }
+
+    async function requestNativeWrappedDecals(engine: NonNullable<typeof engineRef.current>, decals: any[]) {
+        if (engine.params.fingerprintRenderMode !== 'surface' || !Array.isArray(decals) || decals.length === 0) {
+            engine.params._fingerprintNativeDecals = [];
+            engine.params._fingerprintNativeCircles = [];
+            engine.params._fingerprintNativeLines = [];
+            engine.params._fingerprintNativePending = false;
+            return;
+        }
+
+        const baseGeometry = findSceneBaseGeometry(engine.scene);
+        const shellMesh = findSceneShellMesh(engine.scene);
+        const sourceGeometry = baseGeometry || shellMesh?.geometry || null;
+        const mesh = sourceGeometry ? serializeGeometryForNativeWrap(sourceGeometry) : null;
+        if (!mesh) {
+            engine.params._fingerprintNativeDecals = [];
+            engine.params._fingerprintNativeCircles = [];
+            engine.params._fingerprintNativeLines = [];
+            engine.params._fingerprintNativePending = false;
+            return;
+        }
+
+        const generation = ++nativeWrapGenerationRef.current;
+        engine.params._fingerprintNativePending = true;
+        const payload = {
+            ...mesh,
+            decals: decals.map((decal, index) => ({
+                index,
+                position: decal.position,
+                normal: decal.normal,
+                faceIndex: Number.isInteger(decal.faceIndex) ? decal.faceIndex : -1,
+                size: decal.size,
+                rotation: decal.rotation || 0,
+            })),
+        };
+
+        try {
+            const response = await fetch('http://127.0.0.1:3100/wrap-decals', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!response.ok) {
+                throw new Error(await response.text());
+            }
+            const result = await response.json();
+            if (generation !== nativeWrapGenerationRef.current || engineRef.current !== engine) return;
+            engine.params._fingerprintNativePending = false;
+
+            const nativeDecals = Array.isArray(result.decals)
+                ? result.decals.map((wrapped: any) => {
+                    const sourceDecal = decals[wrapped.index];
+                    if (!sourceDecal?.texture) return null;
+                    return { ...wrapped, texture: sourceDecal.texture };
+                }).filter(Boolean)
+                : [];
+
+            engine.params._fingerprintNativeDecals = nativeDecals;
+            const { nativeCircles, nativeLines } = buildNativeBakeData(decals, nativeDecals);
+            engine.params._fingerprintNativeCircles = nativeCircles;
+            engine.params._fingerprintNativeLines = nativeLines;
+            console.log(`[NativeWrap] ${nativeDecals.length}/${decals.length} decal(s) wrapped in ${result.ms ?? '?'}ms`);
+
+            if (engine.params.skinType === 'fingerprint' && engine.params.fingerprintRenderMode === 'surface') {
+                const isBakeBuild = Boolean(engine.params.bakeHoles || engine.params.bakeTubes || engine.params.previewTubes);
+                const g = buildPavilion(engine.scene, engine.params);
+                if (isBakeBuild) {
+                    onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
+                    onSecondaryGeomRef.current?.(g.userData.secondaryGeometry ?? null);
+                }
+                if (g.userData?.extrusionPreviewSuppressed) {
+                    onExtrusionPreviewAutoDisabledRef.current?.(g.userData.extrusionPreviewSuppressReason || 'Extrusion preview was disabled');
+                }
+            }
+        } catch (error) {
+            if (generation !== nativeWrapGenerationRef.current || engineRef.current !== engine) return;
+            engine.params._fingerprintNativeDecals = [];
+            engine.params._fingerprintNativeCircles = [];
+            engine.params._fingerprintNativeLines = [];
+            engine.params._fingerprintNativePending = false;
+            console.error('[NativeWrap] Failed to wrap decals natively:', error);
+        }
+    }
+
     useEffect(() => {
         if (!mountRef.current) return;
 
@@ -111,10 +575,17 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                 (localParams as any)._cachedDrillGeometries = [];
             };
 
+            const applyBuildSideEffects = (g: THREE.Group) => {
+                if (g.userData?.extrusionPreviewSuppressed) {
+                    onExtrusionPreviewAutoDisabledRef.current?.(g.userData.extrusionPreviewSuppressReason || 'Extrusion preview was disabled');
+                }
+            };
+
             const rebuildScene = () => {
                 const g = buildPavilion(scene, localParams);
                 onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
                 onSecondaryGeomRef.current?.(g.userData.secondaryGeometry ?? null);
+                applyBuildSideEffects(g);
                 updateEnvironment(scene, localParams);
                 return g;
             };
@@ -180,6 +651,7 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
             const initialGroup = buildPavilion(scene, localParams);
             onBaseGeomRef.current?.(initialGroup.userData.baseGeometry ?? null);
             onSecondaryGeomRef.current?.(initialGroup.userData.secondaryGeometry ?? null);
+            applyBuildSideEffects(initialGroup);
 
             // Debounced rebuild for GUI
             let rebuildTimeout: number | null = null;
@@ -323,16 +795,28 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
 
     useEffect(() => {
         if (engineRef.current && fingerprintCanvas && engineRef.current.params.skinType === 'fingerprint') {
-            const tex = new THREE.CanvasTexture(fingerprintCanvas);
-            tex.wrapS = THREE.RepeatWrapping;
-            tex.wrapT = THREE.RepeatWrapping;
-            tex.needsUpdate = true;
-            tex.colorSpace = THREE.SRGBColorSpace;
+            const tex = createFingerprintThreeTexture(
+                fingerprintCanvas,
+                engineRef.current.params.fingerprintRenderMode,
+                engineRef.current.params.materialColor
+            );
 
             if (engineRef.current.params._fingerprintTexture && engineRef.current.params._fingerprintTexture !== tex) {
                 engineRef.current.params._fingerprintTexture.dispose();
             }
+            if (Array.isArray(engineRef.current.params._fingerprintDecals)) {
+                engineRef.current.params._fingerprintDecals.forEach((decal: any) => decal.texture?.dispose?.());
+            }
+            const surfaceDecals = createSurfaceDecals(fingerprintCanvas);
             engineRef.current.params._fingerprintTexture = tex;
+            engineRef.current.params._fingerprintDecals = surfaceDecals;
+            engineRef.current.params._fingerprintNativeDecals = [];
+            engineRef.current.params._fingerprintNativeCircles = [];
+            engineRef.current.params._fingerprintNativeLines = [];
+            engineRef.current.params._fingerprintNativePending = engineRef.current.params.fingerprintRenderMode === 'surface' && surfaceDecals.length > 0;
+            if (engineRef.current.params.fingerprintRenderMode === 'surface') {
+                requestNativeWrappedDecals(engineRef.current, surfaceDecals);
+            }
             engineRef.current.params._fingerprintCircles = dotCircles;
             engineRef.current.params._fingerprintLines = streamlines;
             engineRef.current.params._fingerprintCanvasWidth = fingerprintCanvas.width;
@@ -357,12 +841,24 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
             engineRef.current.params.previewTubes = isNewPreviewTubes;
             engineRef.current.params.previewSolidCheck = showSolidCheck;
 
+            const waitsForNativeSurfaceBake =
+                engineRef.current.params.fingerprintRenderMode === 'surface' &&
+                surfaceDecals.length > 0 &&
+                (isNewBakeHoles || isNewBakeTubes || isNewPreviewTubes);
+
             if (isNewBakeHoles || isNewBakeTubes || isNewPreviewTubes) {
                 // Full rebuild with CSG holes
-                const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
-                onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
-                onSecondaryGeomRef.current?.(g.userData.secondaryGeometry ?? null);
-            } else if (editing3D) {
+                if (waitsForNativeSurfaceBake) {
+                    console.log('[NativeWrap] Waiting for native surface bake data before building holes/tubes...');
+                } else {
+                    const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
+                    onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
+                    onSecondaryGeomRef.current?.(g.userData.secondaryGeometry ?? null);
+                    if (g.userData?.extrusionPreviewSuppressed) {
+                        onExtrusionPreviewAutoDisabledRef.current?.(g.userData.extrusionPreviewSuppressReason || 'Extrusion preview was disabled');
+                    }
+                }
+            } else if (editing3D && engineRef.current.params.fingerprintRenderMode !== 'surface') {
                 // Fast path for live 3D editing: just update the texture without rebuilding geometry
                 let shellMesh: any = null;
                 engineRef.current.scene.traverse((child: any) => {
@@ -371,32 +867,41 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                     }
                 });
                 if (shellMesh && shellMesh.material) {
-                    if (Array.isArray(shellMesh.material)) {
-                        shellMesh.material.forEach((m: any) => {
+                    const applyTexture = (m: any) => {
+                        if (engineRef.current?.params.fingerprintRenderMode === 'paint') {
+                            m.alphaMap = null;
+                            m.alphaTest = 0;
+                            m.transparent = false;
+                            m.map = tex;
+                            m.color.set('#ffffff');
+                        } else {
+                            m.map = null;
                             m.alphaMap = tex;
                             m.alphaTest = 0.1;
                             m.transparent = true;
-                            m.needsUpdate = true;
-                        });
+                        }
+                        m.needsUpdate = true;
+                    };
+
+                    if (Array.isArray(shellMesh.material)) {
+                        shellMesh.material.forEach(applyTexture);
                     } else {
-                        shellMesh.material.alphaMap = tex;
-                        shellMesh.material.alphaTest = 0.1;
-                        shellMesh.material.transparent = true;
-                        shellMesh.material.needsUpdate = true;
+                        applyTexture(shellMesh.material);
                     }
                 }
             } else {
                 // Non-bake rebuild (preview, texture-only apply)
                 const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
-                onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
-                onSecondaryGeomRef.current?.(g.userData.secondaryGeometry ?? null);
+                if (g.userData?.extrusionPreviewSuppressed) {
+                    onExtrusionPreviewAutoDisabledRef.current?.(g.userData.extrusionPreviewSuppressReason || 'Extrusion preview was disabled');
+                }
             }
 
             if (engineRef.current.params.skinType !== 'fingerprint') {
                 engineRef.current.params.skinType = 'fingerprint';
             }
         }
-    }, [fingerprintCanvas, bakeHolesTrigger, bakeTubesTrigger, previewTubesTrigger, showSolidCheck, dotCircles, streamlines, editing3D]);
+    }, [fingerprintCanvas, bakeHolesTrigger, bakeTubesTrigger, previewTubesTrigger, showSolidCheck, dotCircles, streamlines, fingerprintItems, globalSettings, editing3D]);
 
     useEffect(() => {
         if (engineRef.current) {
@@ -418,6 +923,9 @@ export const Pavilion3D = forwardRef<Pavilion3DHandle, Pavilion3DProps>(function
                 const g = buildPavilion(engineRef.current.scene, engineRef.current.params);
                 onBaseGeomRef.current?.(g.userData.baseGeometry ?? null);
                 onSecondaryGeomRef.current?.(g.userData.secondaryGeometry ?? null);
+                if (g.userData?.extrusionPreviewSuppressed) {
+                    onExtrusionPreviewAutoDisabledRef.current?.(g.userData.extrusionPreviewSuppressReason || 'Extrusion preview was disabled');
+                }
             }
         }
     }, [fabricEnabled, fabricItems, metaballs]);

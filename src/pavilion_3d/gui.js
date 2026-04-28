@@ -105,6 +105,7 @@ export function setupGUI(params, callbacks) {
   fp.add(params, 'fpDotGap', 3, 20, 1).name('Dot Gap').onChange(onParamChange);
   fp.add(params, 'fpLineExtrusion', 0.1, 10.0, 0.1).name('Line Extrusion').onChange(onParamChange);
   fp.add(params, 'fpBackgroundOpacity', 0, 1, 0.05).name('BG Opacity').onChange(onParamChange);
+  fp.add(params, 'fingerprintRenderMode', ['surface', 'cutout', 'paint']).name('Mode').onChange(onParamChange);
   fp.add(params, 'fpSeed', 0, 1000, 1).name('Seed').onChange(onParamChange);
   fp.add(params, 'fpShowPreview').name('Show Preview').onChange(onParamChange);
 
@@ -239,11 +240,26 @@ export function setupGUI(params, callbacks) {
   imp.add(importActions, 'repair').name('Repair / Make Solid');
   imp.add(importActions, 'importSecond').name('Import Second OBJ / STL');
   imp.add(importActions, 'importGlass').name('Import Glass Geometry');
-  imp.add(params, 'importUVMethod', ['original', 'smart', 'planar', 'box', 'spherical', 'cylindrical']).name('UV Method').onChange(async () => {
+  imp.add(params, 'importUVMethod', [
+    'native-minimum-stretch',
+    'native-angle-based',
+    'native-conformal',
+    'original',
+    'smart',
+    'planar',
+    'box',
+    'spherical',
+    'cylindrical',
+  ]).name('UV Method').onChange(async () => {
     const geometries = [params._importedGeometry, params._secondaryImportedGeometry, params._glassGeometry].filter(Boolean);
     if (geometries.length === 0) return;
 
-    const { applyUVMethod } = await import('./utils/importModel.js');
+    const { applyUVMethod, isNativeUVMethod } = await import('./utils/importModel.js');
+    if (isNativeUVMethod(params.importUVMethod)) {
+      alert('Native UV methods need the original OBJ/STL file. Select the method first, then import the model again.');
+      return;
+    }
+
     for (const geometry of geometries) {
       await applyUVMethod(geometry, params.importUVMethod);
       geometry.computeVertexNormals();

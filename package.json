@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
+    "uv:server": "node scripts/uv-server.mjs",
+    "native:wrap:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-native-wrap.ps1",
     "stop:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-dev-server.ps1",
     "build": "vite build",
     "preview": "vite preview",

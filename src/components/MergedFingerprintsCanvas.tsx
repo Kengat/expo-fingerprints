@@ -9,6 +9,11 @@ export type CanvasItem = {
     rotation: number;
     scale: number;
     params: FingerprintParams;
+    surfaceAnchor?: {
+        position: [number, number, number];
+        normal: [number, number, number];
+        faceIndex?: number;
+    };
 };
 
 export type StreamlinePoint = { x: number; y: number; thickness: number };
@@ -86,8 +91,33 @@ type VisibleDotPoint = { x: number; y: number; gx: number; gy: number };
 
 export type EdgeDistanceField = {
     field: Float32Array;
-    gridSize: number;
+    islandIds: Int32Array;
+    islandCount: number;
+    gridWidth: number;
+    gridHeight: number;
+    canvasWidth: number;
+    canvasHeight: number;
 } | null;
+
+export function getRenderCanvasDimensions(globalSettings: any = null) {
+    const stretchX = Math.max(0.2, globalSettings?.canvasStretchX ?? 1);
+    const stretchY = Math.max(0.2, globalSettings?.canvasStretchY ?? 1);
+    return {
+        width: Math.max(1, Math.round(UV_SIZE * stretchX)),
+        height: Math.max(1, Math.round(UV_SIZE * stretchY)),
+    };
+}
+
+function getBackgroundRenderMetrics(globalSettings: any = null) {
+    const { width, height } = getRenderCanvasDimensions(globalSettings);
+    return {
+        renderWidth: width,
+        renderHeight: height,
+        centerX: width / 2,
+        centerY: height / 2,
+        radius: Math.hypot(width, height) * 0.55,
+    };
+}
 
 /**
  * Rasterizes the geometry's UV triangles as a filled mask,
@@ -95,19 +125,28 @@ export type EdgeDistanceField = {
  * it is from the nearest outside pixel (= nearest geometry edge).
  * Outside pixels get Infinity (won't trigger culling).
  */
-export function createGeometryEdgeDistField(geometry: any, gridSize: number = 256): EdgeDistanceField {
+export function createGeometryEdgeDistField(
+    geometry: any,
+    gridSize: number = 256,
+    canvasWidth: number = UV_SIZE,
+    canvasHeight: number = UV_SIZE,
+): EdgeDistanceField {
     const uv = geometry.getAttribute('uv');
     const index = geometry.getIndex();
     if (!uv) return null;
 
+    const baseScale = gridSize / UV_SIZE;
+    const gridWidth = Math.max(8, Math.round(canvasWidth * baseScale));
+    const gridHeight = Math.max(8, Math.round(canvasHeight * baseScale));
+
     const canvas = document.createElement('canvas');
-    canvas.width = gridSize;
-    canvas.height = gridSize;
+    canvas.width = gridWidth;
+    canvas.height = gridHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
 
     ctx.fillStyle = 'black';
-    ctx.fillRect(0, 0, gridSize, gridSize);
+    ctx.fillRect(0, 0, gridWidth, gridHeight);
 
     ctx.fillStyle = 'white';
     const triCount = index ? index.count / 3 : uv.count / 3;
@@ -116,12 +155,12 @@ export function createGeometryEdgeDistField(geometry: any, gridSize: number = 25
         const i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1;
         const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
 
-        const u0 = uv.getX(i0) * gridSize;
-        const v0 = (1 - uv.getY(i0)) * gridSize;
-        const u1 = uv.getX(i1) * gridSize;
-        const v1 = (1 - uv.getY(i1)) * gridSize;
-        const u2 = uv.getX(i2) * gridSize;
-        const v2 = (1 - uv.getY(i2)) * gridSize;
+        const u0 = uv.getX(i0) * gridWidth;
+        const v0 = (1 - uv.getY(i0)) * gridHeight;
+        const u1 = uv.getX(i1) * gridWidth;
+        const v1 = (1 - uv.getY(i1)) * gridHeight;
+        const u2 = uv.getX(i2) * gridWidth;
+        const v2 = (1 - uv.getY(i2)) * gridHeight;
 
         ctx.beginPath();
         ctx.moveTo(u0, v0);
@@ -131,33 +170,33 @@ export function createGeometryEdgeDistField(geometry: any, gridSize: number = 25
         ctx.fill();
     }
 
-    const imageData = ctx.getImageData(0, 0, gridSize, gridSize);
+    const imageData = ctx.getImageData(0, 0, gridWidth, gridHeight);
     const pixels = imageData.data;
-    const mask = new Uint8Array(gridSize * gridSize);
-    for (let i = 0; i < gridSize * gridSize; i++) {
+    const mask = new Uint8Array(gridWidth * gridHeight);
+    for (let i = 0; i < gridWidth * gridHeight; i++) {
         mask[i] = pixels[i * 4] > 128 ? 1 : 0;
     }
 
-    const INF = gridSize * 2;
-    const N = gridSize * gridSize;
+    const INF = Math.max(gridWidth, gridHeight) * 2;
+    const N = gridWidth * gridHeight;
 
     function distTransform(src: Float32Array) {
-        for (let y = 0; y < gridSize; y++) {
-            for (let x = 0; x < gridSize; x++) {
-                const idx = y * gridSize + x;
-                if (y > 0) src[idx] = Math.min(src[idx], src[(y - 1) * gridSize + x] + 1);
-                if (x > 0) src[idx] = Math.min(src[idx], src[y * gridSize + x - 1] + 1);
-                if (y > 0 && x > 0) src[idx] = Math.min(src[idx], src[(y - 1) * gridSize + x - 1] + 1.414);
-                if (y > 0 && x < gridSize - 1) src[idx] = Math.min(src[idx], src[(y - 1) * gridSize + x + 1] + 1.414);
+        for (let y = 0; y < gridHeight; y++) {
+            for (let x = 0; x < gridWidth; x++) {
+                const idx = y * gridWidth + x;
+                if (y > 0) src[idx] = Math.min(src[idx], src[(y - 1) * gridWidth + x] + 1);
+                if (x > 0) src[idx] = Math.min(src[idx], src[y * gridWidth + x - 1] + 1);
+                if (y > 0 && x > 0) src[idx] = Math.min(src[idx], src[(y - 1) * gridWidth + x - 1] + 1.414);
+                if (y > 0 && x < gridWidth - 1) src[idx] = Math.min(src[idx], src[(y - 1) * gridWidth + x + 1] + 1.414);
             }
         }
-        for (let y = gridSize - 1; y >= 0; y--) {
-            for (let x = gridSize - 1; x >= 0; x--) {
-                const idx = y * gridSize + x;
-                if (y < gridSize - 1) src[idx] = Math.min(src[idx], src[(y + 1) * gridSize + x] + 1);
-                if (x < gridSize - 1) src[idx] = Math.min(src[idx], src[y * gridSize + x + 1] + 1);
-                if (y < gridSize - 1 && x < gridSize - 1) src[idx] = Math.min(src[idx], src[(y + 1) * gridSize + x + 1] + 1.414);
-                if (y < gridSize - 1 && x > 0) src[idx] = Math.min(src[idx], src[(y + 1) * gridSize + x - 1] + 1.414);
+        for (let y = gridHeight - 1; y >= 0; y--) {
+            for (let x = gridWidth - 1; x >= 0; x--) {
+                const idx = y * gridWidth + x;
+                if (y < gridHeight - 1) src[idx] = Math.min(src[idx], src[(y + 1) * gridWidth + x] + 1);
+                if (x < gridWidth - 1) src[idx] = Math.min(src[idx], src[y * gridWidth + x + 1] + 1);
+                if (y < gridHeight - 1 && x < gridWidth - 1) src[idx] = Math.min(src[idx], src[(y + 1) * gridWidth + x + 1] + 1.414);
+                if (y < gridHeight - 1 && x > 0) src[idx] = Math.min(src[idx], src[(y + 1) * gridWidth + x - 1] + 1.414);
             }
         }
     }
@@ -165,32 +204,97 @@ export function createGeometryEdgeDistField(geometry: any, gridSize: number = 25
     const distIn = new Float32Array(N);
     const distOut = new Float32Array(N);
     for (let i = 0; i < N; i++) {
-        const x = i % gridSize;
-        const y = (i - x) / gridSize;
-        const onBorder = x === 0 || x === gridSize - 1 || y === 0 || y === gridSize - 1;
+        const x = i % gridWidth;
+        const y = (i - x) / gridWidth;
+        const onBorder = x === 0 || x === gridWidth - 1 || y === 0 || y === gridHeight - 1;
         distIn[i] = (mask[i] === 0 || onBorder) ? 0 : INF;
         distOut[i] = (mask[i] === 1 && !onBorder) ? 0 : INF;
     }
     distTransform(distIn);
     distTransform(distOut);
 
-    const scale = UV_SIZE / gridSize;
+    const scale = canvasWidth / gridWidth;
     const dist = new Float32Array(N);
     for (let i = 0; i < N; i++) {
         dist[i] = (mask[i] === 1 ? distIn[i] : distOut[i]) * scale;
     }
 
-    return { field: dist, gridSize };
+    const islandIds = new Int32Array(N);
+    let islandCount = 0;
+    const stack: number[] = [];
+    for (let i = 0; i < N; i++) {
+        if (mask[i] !== 1 || islandIds[i] !== 0) continue;
+        islandCount++;
+        islandIds[i] = islandCount;
+        stack.push(i);
+
+        while (stack.length > 0) {
+            const idx = stack.pop()!;
+            const x = idx % gridWidth;
+            const y = (idx - x) / gridWidth;
+            const neighbors = [
+                x > 0 ? idx - 1 : -1,
+                x < gridWidth - 1 ? idx + 1 : -1,
+                y > 0 ? idx - gridWidth : -1,
+                y < gridHeight - 1 ? idx + gridWidth : -1,
+            ];
+
+            for (const next of neighbors) {
+                if (next < 0 || mask[next] !== 1 || islandIds[next] !== 0) continue;
+                islandIds[next] = islandCount;
+                stack.push(next);
+            }
+        }
+    }
+
+    return { field: dist, islandIds, islandCount, gridWidth, gridHeight, canvasWidth, canvasHeight };
 }
 
 function sampleEdgeDistance(distField: EdgeDistanceField, worldX: number, worldY: number): number {
     if (!distField) return Infinity;
-    const { field, gridSize } = distField;
-    const scale = UV_SIZE / gridSize;
-    const px = Math.floor(worldX / scale);
-    const py = Math.floor(worldY / scale);
-    if (px < 0 || px >= gridSize || py < 0 || py >= gridSize) return Infinity;
-    return field[py * gridSize + px];
+    const { field, gridWidth, gridHeight, canvasWidth, canvasHeight } = distField;
+    if (worldX < 0 || worldX > canvasWidth || worldY < 0 || worldY > canvasHeight) return Infinity;
+    const px = Math.min(gridWidth - 1, Math.floor((worldX / canvasWidth) * gridWidth));
+    const py = Math.min(gridHeight - 1, Math.floor((worldY / canvasHeight) * gridHeight));
+    return field[py * gridWidth + px];
+}
+
+function sampleIslandId(distField: EdgeDistanceField, worldX: number, worldY: number): number {
+    if (!distField) return 0;
+    const { islandIds, gridWidth, gridHeight, canvasWidth, canvasHeight } = distField;
+    if (!islandIds || worldX < 0 || worldX > canvasWidth || worldY < 0 || worldY > canvasHeight) return 0;
+    const px = Math.min(gridWidth - 1, Math.floor((worldX / canvasWidth) * gridWidth));
+    const py = Math.min(gridHeight - 1, Math.floor((worldY / canvasHeight) * gridHeight));
+    return islandIds[py * gridWidth + px] || 0;
+}
+
+function findNearestIslandId(distField: EdgeDistanceField, worldX: number, worldY: number, searchRadius: number): number {
+    if (!distField) return 0;
+    const direct = sampleIslandId(distField, worldX, worldY);
+    if (direct) return direct;
+
+    const { gridWidth, gridHeight, canvasWidth, canvasHeight, islandIds } = distField;
+    if (!islandIds) return 0;
+    const cx = Math.min(gridWidth - 1, Math.max(0, Math.floor((worldX / canvasWidth) * gridWidth)));
+    const cy = Math.min(gridHeight - 1, Math.max(0, Math.floor((worldY / canvasHeight) * gridHeight)));
+    const radiusPx = Math.max(1, Math.ceil((searchRadius / Math.max(canvasWidth, canvasHeight)) * Math.max(gridWidth, gridHeight)));
+
+    for (let r = 1; r <= radiusPx; r++) {
+        for (let y = Math.max(0, cy - r); y <= Math.min(gridHeight - 1, cy + r); y++) {
+            for (let x = Math.max(0, cx - r); x <= Math.min(gridWidth - 1, cx + r); x++) {
+                if (Math.max(Math.abs(x - cx), Math.abs(y - cy)) !== r) continue;
+                const id = islandIds[y * gridWidth + x];
+                if (id) return id;
+            }
+        }
+    }
+
+    return 0;
+}
+
+function isOutsideTargetIsland(distField: EdgeDistanceField, targetIslandId: number, worldX: number, worldY: number): boolean {
+    if (!distField || !targetIslandId) return false;
+    return sampleIslandId(distField, worldX, worldY) !== targetIslandId;
 }
 
 function isNearGeometryEdge(distField: EdgeDistanceField, worldX: number, worldY: number, dotRadius: number, edgeCullRadius: number): boolean {
@@ -369,10 +473,13 @@ export function renderFingerprints(
         const bgLineDensity = (globalSettings.bgLineDensity ?? 31.0) / gs;
         const bgNoiseScale = (globalSettings.bgNoiseScale ?? 7.0) / gs;
         const bgLineThickness = (globalSettings.bgLineThickness ?? 3) * gs;
-
-        const cx = UV_SIZE / 2;
-        const cy = UV_SIZE / 2;
-        const radius = UV_SIZE * 0.8; // Cover the UV square
+        const {
+            renderWidth,
+            renderHeight,
+            centerX: cx,
+            centerY: cy,
+            radius,
+        } = getBackgroundRenderMetrics(globalSettings);
         const lineSpacing = 512 / bgLineDensity;
 
         const cos = Math.cos(bgRotation * Math.PI / 180);
@@ -385,8 +492,8 @@ export function renderFingerprints(
         };
 
         function getBgSize(gx: number, gy: number) {
-            const nx = (gx / UV_SIZE) * 2 - 1;
-            const ny = -((gy / UV_SIZE) * 2 - 1);
+            const nx = (gx / renderWidth) * 2 - 1;
+            const ny = -((gy / renderHeight) * 2 - 1);
             let v = 0;
             v += Math.sin(nx * bgNoiseScale) * Math.cos(ny * bgNoiseScale);
             v += 0.5 * Math.sin(nx * (bgNoiseScale * 2)) * Math.cos(ny * (bgNoiseScale * 2));
@@ -416,8 +523,8 @@ export function renderFingerprints(
                 const p2 = transformBgPoint(line[i].x, line[i].y);
 
                 // Cull against ALL fingerprints (startLayer = 0) and UV bounds
-                if (p1.x >= 0 && p1.x <= UV_SIZE && p1.y >= 0 && p1.y <= UV_SIZE &&
-                    p2.x >= 0 && p2.x <= UV_SIZE && p2.y >= 0 && p2.y <= UV_SIZE &&
+                if (p1.x >= 0 && p1.x <= renderWidth && p1.y >= 0 && p1.y <= renderHeight &&
+                    p2.x >= 0 && p2.x <= renderWidth && p2.y >= 0 && p2.y <= renderHeight &&
                     !isCulledByAny(p1.x, p1.y, cullingOffset, 0) && !isCulledByAny(p2.x, p2.y, cullingOffset, 0)) {
                     
                     const lw = getBgLineThickness(p1.x, p1.y);
@@ -451,7 +558,7 @@ export function renderFingerprints(
 
                     const globalP2 = transformBgPoint(p2.x, p2.y);
                     
-                    if (globalP2.x >= 0 && globalP2.x <= UV_SIZE && globalP2.y >= 0 && globalP2.y <= UV_SIZE) {
+                    if (globalP2.x >= 0 && globalP2.x <= renderWidth && globalP2.y >= 0 && globalP2.y <= renderHeight) {
                         const radius = getBgSize(globalP2.x, globalP2.y);
                         const bleedMargin = radius / 256;
                         if (!isCulledByAny(globalP2.x, globalP2.y, cullingOffset - bleedMargin, 0) &&
@@ -615,10 +722,13 @@ export function collectDotCircles(
         const bgDotSizeMax = (globalSettings.bgDotSizeMax ?? 4.0) * gs;
         const bgLineDensity = (globalSettings.bgLineDensity ?? 31.0) / gs;
         const bgNoiseScale = (globalSettings.bgNoiseScale ?? 7.0) / gs;
-
-        const cx = UV_SIZE / 2;
-        const cy = UV_SIZE / 2;
-        const radius = UV_SIZE * 0.8;
+        const {
+            renderWidth,
+            renderHeight,
+            centerX: cx,
+            centerY: cy,
+            radius,
+        } = getBackgroundRenderMetrics(globalSettings);
         const lineSpacing = 512 / bgLineDensity;
 
         const cos = Math.cos(bgRotation * Math.PI / 180);
@@ -631,8 +741,8 @@ export function collectDotCircles(
         };
 
         function getBgSize(gx: number, gy: number) {
-            const nx = (gx / UV_SIZE) * 2 - 1;
-            const ny = -((gy / UV_SIZE) * 2 - 1);
+            const nx = (gx / renderWidth) * 2 - 1;
+            const ny = -((gy / renderHeight) * 2 - 1);
             let v = 0;
             v += Math.sin(nx * bgNoiseScale) * Math.cos(ny * bgNoiseScale);
             v += 0.5 * Math.sin(nx * (bgNoiseScale * 2)) * Math.cos(ny * (bgNoiseScale * 2));
@@ -664,7 +774,7 @@ export function collectDotCircles(
 
                     const globalP2 = transformBgPoint(p2.x, p2.y);
                     
-                    if (globalP2.x >= 0 && globalP2.x <= UV_SIZE && globalP2.y >= 0 && globalP2.y <= UV_SIZE) {
+                    if (globalP2.x >= 0 && globalP2.x <= renderWidth && globalP2.y >= 0 && globalP2.y <= renderHeight) {
                         const baseRadius = getBgSize(globalP2.x, globalP2.y);
                         const bleedMargin = baseRadius / 256;
                         if (!isCulledByAny(globalP2.x, globalP2.y, cullingOffset - bleedMargin, 0) &&
@@ -802,10 +912,13 @@ export function collectStreamlines(
         const bgRotation = globalSettings.bgRotation ?? 0;
         const bgLineDensity = (globalSettings.bgLineDensity ?? 31.0) / gs;
         const bgLineThickness = (globalSettings.bgLineThickness ?? 3) * gs;
-
-        const cx = UV_SIZE / 2;
-        const cy = UV_SIZE / 2;
-        const radius = UV_SIZE * 0.8;
+        const {
+            renderWidth,
+            renderHeight,
+            centerX: cx,
+            centerY: cy,
+            radius,
+        } = getBackgroundRenderMetrics(globalSettings);
         const lineSpacing = 512 / bgLineDensity;
 
         const cos = Math.cos(bgRotation * Math.PI / 180);
@@ -831,7 +944,7 @@ export function collectStreamlines(
             for (let i = 0; i < line.length; i++) {
                 const globalP = transformBgPoint(line[i].x, line[i].y);
                 
-                if (globalP.x >= 0 && globalP.x <= UV_SIZE && globalP.y >= 0 && globalP.y <= UV_SIZE) {
+                if (globalP.x >= 0 && globalP.x <= renderWidth && globalP.y >= 0 && globalP.y <= renderHeight) {
                     const baseThickness = bgLineThickness;
                     const halfLw = baseThickness / 2;
                     const culled = isCulledByAny(globalP.x, globalP.y, cullingOffset, 0) || 
@@ -968,15 +1081,15 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
             // Returns an offscreen canvas rendered with a computed "fit all" view,
             // independent of the editor's current pan/zoom.
             getTextureCanvas: () => {
-                const texSize = UV_SIZE;
+                const { width: texWidth, height: texHeight } = getRenderCanvasDimensions(globalSettings);
                 const offscreen = document.createElement('canvas');
-                offscreen.width = texSize;
-                offscreen.height = texSize;
+                offscreen.width = texWidth;
+                offscreen.height = texHeight;
                 const ctx = offscreen.getContext('2d');
                 if (!ctx) return offscreen;
 
                 const fixedView = { x: 0, y: 0, zoom: 1 };
-                renderFingerprints(ctx, items, fixedView, texSize, texSize, cullingOffset, edgeCullRadius, edgeDistField, globalSettings);
+                renderFingerprints(ctx, items, fixedView, texWidth, texHeight, cullingOffset, edgeCullRadius, edgeDistField, globalSettings);
                 return offscreen;
             },
             getTextureDotCircles: () => {
@@ -1006,10 +1119,13 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
                     const bgLineDensity = (globalSettings.bgLineDensity ?? 31.0) / gs;
                     const bgNoiseScale = (globalSettings.bgNoiseScale ?? 7.0) / gs;
                     const bgLineThickness = (globalSettings.bgLineThickness ?? 3) * gs;
-
-                    const cx = UV_SIZE / 2;
-                    const cy = UV_SIZE / 2;
-                    const radius = UV_SIZE * 0.8;
+                    const {
+                        renderWidth,
+                        renderHeight,
+                        centerX: cx,
+                        centerY: cy,
+                        radius,
+                    } = getBackgroundRenderMetrics(globalSettings);
                     const lineSpacing = 512 / bgLineDensity;
 
                     const cos = Math.cos(bgRotation * Math.PI / 180);
@@ -1022,8 +1138,8 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
                     };
 
                     function getBgSize(gx: number, gy: number) {
-                        const nx = (gx / UV_SIZE) * 2 - 1;
-                        const ny = -((gy / UV_SIZE) * 2 - 1);
+                        const nx = (gx / renderWidth) * 2 - 1;
+                        const ny = -((gy / renderHeight) * 2 - 1);
                         let v = 0;
                         v += Math.sin(nx * bgNoiseScale) * Math.cos(ny * bgNoiseScale);
                         v += 0.5 * Math.sin(nx * (bgNoiseScale * 2)) * Math.cos(ny * (bgNoiseScale * 2));
@@ -1045,8 +1161,8 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
                             const p1 = transformBgPoint(line[i - 1].x, line[i - 1].y);
                             const p2 = transformBgPoint(line[i].x, line[i].y);
 
-                            if (p1.x >= 0 && p1.x <= UV_SIZE && p1.y >= 0 && p1.y <= UV_SIZE &&
-                                p2.x >= 0 && p2.x <= UV_SIZE && p2.y >= 0 && p2.y <= UV_SIZE) {
+                            if (p1.x >= 0 && p1.x <= renderWidth && p1.y >= 0 && p1.y <= renderHeight &&
+                                p2.x >= 0 && p2.x <= renderWidth && p2.y >= 0 && p2.y <= renderHeight) {
                                 
                                 const v1x = p1.x * view.zoom + view.x;
                                 const v1y = p1.y * view.zoom + view.y;
@@ -1079,7 +1195,7 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
 
                                 const globalP2 = transformBgPoint(p2.x, p2.y);
                                 
-                                if (globalP2.x >= 0 && globalP2.x <= UV_SIZE && globalP2.y >= 0 && globalP2.y <= UV_SIZE) {
+                                if (globalP2.x >= 0 && globalP2.x <= renderWidth && globalP2.y >= 0 && globalP2.y <= renderHeight) {
                                     const v2x = globalP2.x * view.zoom + view.x;
                                     const v2y = globalP2.y * view.zoom + view.y;
 
@@ -1130,8 +1246,10 @@ export const MergedFingerprintsCanvas = forwardRef<HTMLCanvasElement, MergedFing
                     };
 
                     const isCulled = (gx: number, gy: number, customOffset: number = cullingOffset) => {
+                        const ux = (gx - view.x) / view.zoom;
+                        const uy = (gy - view.y) / view.zoom;
                         for (let aboveIndex = layerIndex + 1; aboveIndex < items.length; aboveIndex++) {
-                            if (isInsideFingerprint((gx - view.x) / view.zoom, (gy - view.y) / view.zoom, items[aboveIndex], customOffset)) {
+                            if (isInsideFingerprint(ux, uy, items[aboveIndex], customOffset)) {
                                 return true;
                             }
                         }

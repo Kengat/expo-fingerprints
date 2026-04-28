@@ -15,7 +15,7 @@ import type { FabricItem } from './components/FabricCanvas';
 import { FingerprintEditor3D } from './components/FingerprintEditor3D.tsx';
 import { MetaballEditor3D } from './components/MetaballEditor3D';
 import type { MetaballData } from './components/MetaballEditor3D';
-import { MergedFingerprintsCanvas, computeFitView, renderFingerprints, UV_SIZE, collectDotCircles, getComputedItems, createGeometryEdgeDistField, collectStreamlines } from './components/MergedFingerprintsCanvas';
+import { MergedFingerprintsCanvas, computeFitView, renderFingerprints, UV_SIZE, collectDotCircles, getComputedItems, createGeometryEdgeDistField, collectStreamlines, getRenderCanvasDimensions } from './components/MergedFingerprintsCanvas';
 import type { DotCircle, CanvasItem, EdgeDistanceField, Streamline } from './components/MergedFingerprintsCanvas';
 import { DEFAULT_DOTS_PARAMS, FingerprintParams, GLOBAL_SCALE_MAX, LINE_THICKNESS_SCALE_MIN, LINE_THICKNESS_SCALE_MAX } from './presets';
 
@@ -38,16 +38,16 @@ function loadInitialItems(): CanvasItem[] {
       if (parsed.items) return parsed.items;
     } catch (e) { console.error(e); }
   }
-    return [
-      {
-        id: 'initial',
-        x: 1024,
-        y: 1024,
-        rotation: 0,
-        scale: 1,
-        params: { ...LOCAL_DEFAULT_DOTS_PARAMS, seed: Math.random() }
-      }
-    ];
+  return [
+    {
+      id: 'initial',
+      x: 1024,
+      y: 1024,
+      rotation: 0,
+      scale: 1,
+      params: { ...LOCAL_DEFAULT_DOTS_PARAMS, seed: Math.random() }
+    }
+  ];
 }
 
 function loadInitialGlobalSettings() {
@@ -69,6 +69,8 @@ function loadInitialGlobalSettings() {
     noiseScale: 7,
     globalScale: 1.0,
     bgLinesCreateTubes: false,
+    canvasStretchX: 1.0,
+    canvasStretchY: 1.0,
   };
 }
 
@@ -100,10 +102,22 @@ export default function App() {
   const editorCanvasRef = useRef<{ getCanvas: () => HTMLCanvasElement | null; getDotCircles: () => DotCircle[] }>(null);
   const pavilion3DRef = useRef<Pavilion3DHandle>(null);
 
+  const handleExtrusionPreviewAutoDisabled = React.useCallback((reason: string) => {
+    setExtrusionPreview(false);
+    const engine = pavilion3DRef.current?.getEngine();
+    if (engine) {
+      engine.params.previewExtrusion = false;
+    }
+    if (reason) {
+      console.warn(`[Extrusion Preview] ${reason}`);
+    }
+  }, []);
+
   const edgeDistField = React.useMemo<EdgeDistanceField>(() => {
     if (!baseGeometry) return null;
-    return createGeometryEdgeDistField(baseGeometry);
-  }, [baseGeometry]);
+    const { width, height } = getRenderCanvasDimensions(globalSettings);
+    return createGeometryEdgeDistField(baseGeometry, 256, width, height);
+  }, [baseGeometry, globalSettings.canvasStretchX, globalSettings.canvasStretchY]);
 
   // Persist items/globalSettings
   React.useEffect(() => {
@@ -119,53 +133,57 @@ export default function App() {
   // Live preview for 3D editing
   React.useEffect(() => {
     if (isEditing3D && !isEditingPattern) {
-      const texSize = 1024; // Use slightly lower res for live preview to maintain performance
+      const previewScale = 1024 / UV_SIZE;
+      const { width: renderWidth, height: renderHeight } = getRenderCanvasDimensions(globalSettings);
       const offscreen = document.createElement('canvas');
-      offscreen.width = texSize;
-      offscreen.height = texSize;
+      offscreen.width = Math.max(1, Math.round(renderWidth * previewScale));
+      offscreen.height = Math.max(1, Math.round(renderHeight * previewScale));
       const ctx = offscreen.getContext('2d');
       if (ctx) {
         const computedItems = getComputedItems(items, globalSettings);
-        const fixedView = { x: 0, y: 0, zoom: texSize / UV_SIZE };
-        renderFingerprints(ctx, computedItems, fixedView, texSize, texSize, globalSettings.cullingOffset, globalSettings.edgeCullRadius ?? 0, edgeDistField, globalSettings);
+        const fixedView = { x: 0, y: 0, zoom: previewScale };
+        renderFingerprints(ctx, computedItems, fixedView, offscreen.width, offscreen.height, globalSettings.cullingOffset, globalSettings.edgeCullRadius ?? 0, edgeDistField, globalSettings);
         setFingerprintCanvas(offscreen);
       }
     }
   }, [items, globalSettings, isEditing3D, isEditingPattern, edgeDistField]);
 
   // Auto re-apply texture when edgeCullRadius changes (even outside 3D edit mode)
-  const prevEdgeCullRef = useRef(globalSettings.edgeCullRadius ?? 0);
+  const prevTextureLayoutRef = useRef(`${globalSettings.edgeCullRadius ?? 0}|${globalSettings.canvasStretchX ?? 1}|${globalSettings.canvasStretchY ?? 1}`);
   React.useEffect(() => {
-    const cur = globalSettings.edgeCullRadius ?? 0;
-    if (cur === prevEdgeCullRef.current) return;
-    prevEdgeCullRef.current = cur;
+    const textureLayoutKey = `${globalSettings.edgeCullRadius ?? 0}|${globalSettings.canvasStretchX ?? 1}|${globalSettings.canvasStretchY ?? 1}`;
+    if (textureLayoutKey === prevTextureLayoutRef.current) return;
+    prevTextureLayoutRef.current = textureLayoutKey;
     if (isEditingPattern) return;
-    const texSize = UV_SIZE;
+    const { width: texWidth, height: texHeight } = getRenderCanvasDimensions(globalSettings);
     const offscreen = document.createElement('canvas');
-    offscreen.width = texSize;
-    offscreen.height = texSize;
+    offscreen.width = texWidth;
+    offscreen.height = texHeight;
     const ctx = offscreen.getContext('2d');
     if (ctx) {
       const computed = getComputedItems(items, globalSettings);
       const fixedView = { x: 0, y: 0, zoom: 1 };
-      renderFingerprints(ctx, computed, fixedView, texSize, texSize, globalSettings.cullingOffset, cur, edgeDistField, globalSettings);
+      renderFingerprints(ctx, computed, fixedView, texWidth, texHeight, globalSettings.cullingOffset, globalSettings.edgeCullRadius ?? 0, edgeDistField, globalSettings);
       setFingerprintCanvas(offscreen);
     }
-  }, [globalSettings.edgeCullRadius, edgeDistField]);
+  }, [globalSettings.edgeCullRadius, globalSettings.canvasStretchX, globalSettings.canvasStretchY, globalSettings.cullingOffset, edgeDistField, isEditingPattern, items, globalSettings]);
 
   const generateTextureAndData = (currentItems: CanvasItem[], currentSettings: any) => {
-    const texSize = UV_SIZE;
+    const stretchX = currentSettings.canvasStretchX ?? 1;
+    const stretchY = currentSettings.canvasStretchY ?? 1;
+    const texW = Math.round(UV_SIZE * stretchX);
+    const texH = Math.round(UV_SIZE * stretchY);
     const offscreen = document.createElement('canvas');
-    offscreen.width = texSize;
-    offscreen.height = texSize;
+    offscreen.width = texW;
+    offscreen.height = texH;
     const ctx = offscreen.getContext('2d');
     const computed = getComputedItems(currentItems, currentSettings);
     const fixedView = { x: 0, y: 0, zoom: 1 };
-    
+
     if (ctx) {
-        renderFingerprints(ctx, computed, fixedView, texSize, texSize, currentSettings.cullingOffset, currentSettings.edgeCullRadius ?? 0, edgeDistField, currentSettings);
+      renderFingerprints(ctx, computed, fixedView, texW, texH, currentSettings.cullingOffset, currentSettings.edgeCullRadius ?? 0, edgeDistField, currentSettings);
     }
-    
+
     const circles = collectDotCircles(computed, fixedView, currentSettings.cullingOffset, currentSettings.edgeCullRadius ?? 0, edgeDistField, currentSettings);
     const lines = collectStreamlines(computed, fixedView, currentSettings.cullingOffset, currentSettings.edgeCullRadius ?? 0, edgeDistField, currentSettings);
     return { canvas: offscreen, circles, lines };
@@ -214,6 +232,11 @@ export default function App() {
     // Remove non-serializable or temporary fields
     delete exportParams._fingerprintTexture;
     delete exportParams._fingerprintCircles;
+    delete exportParams._fingerprintLines;
+    delete exportParams._fingerprintDecals;
+    delete exportParams._fingerprintNativeDecals;
+    delete exportParams._fingerprintNativeCircles;
+    delete exportParams._fingerprintNativeLines;
     delete exportParams._fingerprintCanvasWidth;
     delete exportParams._fingerprintCanvasHeight;
 
@@ -300,7 +323,7 @@ export default function App() {
           const g = buildPavilion(engine.scene, engine.params);
           setBaseGeometry(g.userData.baseGeometry ?? null);
           setSecondaryGeometry(g.userData.secondaryGeometry ?? null);
-          
+
           // Force a re-render/re-bake
           const { canvas, circles, lines } = generateTextureAndData(data.items || items, data.globalSettings || globalSettings);
           setFingerprintCanvas(canvas);
@@ -338,12 +361,15 @@ export default function App() {
           showSolidCheck={showSolidCheck}
           dotCircles={dotCircles}
           streamlines={streamlines}
+          fingerprintItems={items}
+          globalSettings={globalSettings}
           onBaseGeometryUpdate={setBaseGeometry}
           onSecondaryGeometryUpdate={setSecondaryGeometry}
           editing3D={isEditing3D}
           fabricEnabled={fabricEnabled}
           fabricItems={fabricItems}
           metaballs={metaballsFinal}
+          onExtrusionPreviewAutoDisabled={handleExtrusionPreviewAutoDisabled}
         />
       </div>
 
@@ -385,6 +411,9 @@ export default function App() {
                   const g = buildPavilion(engine.scene, engine.params);
                   setBaseGeometry(g.userData.baseGeometry ?? null);
                   setSecondaryGeometry(g.userData.secondaryGeometry ?? null);
+                  if (g.userData?.extrusionPreviewSuppressed) {
+                    handleExtrusionPreviewAutoDisabled(g.userData.extrusionPreviewSuppressReason || 'Extrusion preview was disabled');
+                  }
                 }}
               />
               <span className="text-xs font-medium text-slate-200">Extrusion Preview</span>
@@ -408,6 +437,9 @@ export default function App() {
                     const g = buildPavilion(engine.scene, engine.params);
                     setBaseGeometry(g.userData.baseGeometry ?? null);
                     setSecondaryGeometry(g.userData.secondaryGeometry ?? null);
+                    if (g.userData?.extrusionPreviewSuppressed) {
+                      handleExtrusionPreviewAutoDisabled(g.userData.extrusionPreviewSuppressReason || 'Extrusion preview was disabled');
+                    }
                   }
                 }}
               />
@@ -423,165 +455,160 @@ export default function App() {
       {/* Main 3D HUD (Visible only when NOT editing 2D pattern) */}
       {!isEditingPattern && !isEditingFabric && (
         <>
-        <div className="absolute top-6 left-6 z-20 flex flex-col gap-3" style={{ marginTop: '110px' }}>
-          <button
-            onClick={() => setIsEditingPattern(true)}
-            className="flex items-center gap-3 bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(37,99,235,0.3)] transition-all font-medium border border-blue-400/30"
-          >
-            <Fingerprint className="w-5 h-5" />
-            Edit Surface Pattern
-          </button>
-          <button
-            onClick={() => setIsEditingFabric(true)}
-            className="flex items-center gap-3 bg-pink-600 hover:bg-pink-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(236,72,153,0.3)] transition-all font-medium border border-pink-400/30"
-          >
-            <Waves className="w-5 h-5" />
-            Edit Fabric Pattern
-          </button>
-          <button
-            onClick={() => setIsEditing3D(!isEditing3D)}
-            className={`flex items-center gap-3 px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(168,85,247,0.3)] transition-all font-medium border ${
-              isEditing3D
-                ? 'bg-purple-500 hover:bg-purple-400 border-purple-300/50 text-white'
-                : 'bg-purple-600 hover:bg-purple-500 border-purple-400/30 text-white'
-            }`}
-          >
-            <Box className="w-5 h-5" />
-            {isEditing3D ? 'Exit 3D Edit' : 'Edit 3D Mode'}
-          </button>
-          <button
-            onClick={() => setShowSolidCheck(!showSolidCheck)}
-            className={`flex items-center gap-3 px-6 py-3 rounded-xl transition-all font-medium border ${
-              showSolidCheck
-                ? 'bg-emerald-500/30 hover:bg-emerald-500/50 text-emerald-300 border-emerald-400/50'
-                : 'bg-slate-700/50 hover:bg-slate-600/60 text-slate-300 border-slate-500/30'
-            }`}
-            title="Toggle solid check: green = solid (manifold), red = not solid"
-          >
-            <Eye className="w-5 h-5" />
-            {showSolidCheck ? 'Solid Check: ON' : 'Solid Check: OFF'}
-          </button>
-          <button
-            onClick={applyPatternPreviewTubes}
-            className="flex items-center gap-3 bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-300 px-6 py-3 rounded-xl transition-all font-medium border border-indigo-400/30"
-            title="Preview 3D tubes visually before baking"
-          >
-            <Waves className="w-5 h-5" />
-            Preview 3D Tubes
-          </button>
-          <button
-            onClick={applyPatternBakeTubes}
-            className="flex items-center gap-3 bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(79,70,229,0.3)] transition-all font-medium border border-indigo-400/30"
-            title="Calculates extruded 3D tubes from streamlines"
-          >
-            <Waves className="w-5 h-5" />
-            Bake 3D Tubes
-          </button>
-          <button
-            onClick={applyPatternBakeHoles}
-            className="flex items-center gap-3 bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all font-medium border border-emerald-400/30"
-            title="Calculates actual circular geometry holes via CSG"
-          >
-            <Fingerprint className="w-5 h-5" />
-            Bake 3D Holes
-          </button>
-          <button
-            onClick={() => setIsEditingMetaballs(!isEditingMetaballs)}
-            className={`flex items-center gap-3 px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all font-medium border ${
-              isEditingMetaballs
-                ? 'bg-cyan-500 hover:bg-cyan-400 border-cyan-300/50 text-white'
-                : 'bg-cyan-700 hover:bg-cyan-600 border-cyan-400/30 text-white'
-            }`}
-          >
-            <Circle className="w-5 h-5" />
-            {isEditingMetaballs ? 'Exit Metaballs' : 'Edit Metaballs'}
-          </button>
-          <button
-            onClick={() => setFabricEnabled(!fabricEnabled)}
-            className={`flex items-center gap-3 px-6 py-3 rounded-xl shadow-lg transition-all font-medium border ${
-              fabricEnabled
-                ? 'bg-pink-500 hover:bg-pink-400 border-pink-300/50 text-white'
-                : 'bg-slate-700 hover:bg-slate-600 border-slate-500/50 text-white'
-            }`}
-          >
-            <Waves className="w-5 h-5" />
-            {fabricEnabled ? 'Hide Fabric Drape' : 'Show Fabric Drape'}
-          </button>
-          <div className="flex gap-3 mt-2">
+          <div className="absolute top-6 left-6 z-20 flex flex-col gap-3" style={{ marginTop: '110px' }}>
             <button
-              onClick={handleSaveProject}
-              className="flex-1 flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2.5 rounded-xl shadow-lg transition-all font-medium border border-slate-500/50 text-sm"
-              title="Save entire scene and pattern state"
+              onClick={() => setIsEditingPattern(true)}
+              className="flex items-center gap-3 bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(37,99,235,0.3)] transition-all font-medium border border-blue-400/30"
             >
-              <Save className="w-4 h-4" />
-              Save Project
+              <Fingerprint className="w-5 h-5" />
+              Edit Surface Pattern
             </button>
             <button
-              onClick={handleLoadProject}
-              className="flex-1 flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2.5 rounded-xl shadow-lg transition-all font-medium border border-slate-500/50 text-sm"
-              title="Load saved scene and pattern state"
+              onClick={() => setIsEditingFabric(true)}
+              className="flex items-center gap-3 bg-pink-600 hover:bg-pink-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(236,72,153,0.3)] transition-all font-medium border border-pink-400/30"
             >
-              <FolderOpen className="w-4 h-4" />
-              Load Project
+              <Waves className="w-5 h-5" />
+              Edit Fabric Pattern
             </button>
-          </div>
-          <div className="bg-[#1C1D21]/95 backdrop-blur-md border border-white/10 p-3 rounded-xl shadow-lg mt-1">
-            <div className="flex justify-between text-[10px] mb-1">
+            <button
+              onClick={() => setIsEditing3D(!isEditing3D)}
+              className={`flex items-center gap-3 px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(168,85,247,0.3)] transition-all font-medium border ${isEditing3D
+                  ? 'bg-purple-500 hover:bg-purple-400 border-purple-300/50 text-white'
+                  : 'bg-purple-600 hover:bg-purple-500 border-purple-400/30 text-white'
+                }`}
+            >
+              <Box className="w-5 h-5" />
+              {isEditing3D ? 'Exit 3D Edit' : 'Edit 3D Mode'}
+            </button>
+            <button
+              onClick={() => setShowSolidCheck(!showSolidCheck)}
+              className={`flex items-center gap-3 px-6 py-3 rounded-xl transition-all font-medium border ${showSolidCheck
+                  ? 'bg-emerald-500/30 hover:bg-emerald-500/50 text-emerald-300 border-emerald-400/50'
+                  : 'bg-slate-700/50 hover:bg-slate-600/60 text-slate-300 border-slate-500/30'
+                }`}
+              title="Toggle solid check: green = solid (manifold), red = not solid"
+            >
+              <Eye className="w-5 h-5" />
+              {showSolidCheck ? 'Solid Check: ON' : 'Solid Check: OFF'}
+            </button>
+            <button
+              onClick={applyPatternPreviewTubes}
+              className="flex items-center gap-3 bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-300 px-6 py-3 rounded-xl transition-all font-medium border border-indigo-400/30"
+              title="Preview 3D tubes visually before baking"
+            >
+              <Waves className="w-5 h-5" />
+              Preview 3D Tubes
+            </button>
+            <button
+              onClick={applyPatternBakeTubes}
+              className="flex items-center gap-3 bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(79,70,229,0.3)] transition-all font-medium border border-indigo-400/30"
+              title="Calculates extruded 3D tubes from streamlines"
+            >
+              <Waves className="w-5 h-5" />
+              Bake 3D Tubes
+            </button>
+            <button
+              onClick={applyPatternBakeHoles}
+              className="flex items-center gap-3 bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(16,185,129,0.3)] transition-all font-medium border border-emerald-400/30"
+              title="Calculates actual circular geometry holes via CSG"
+            >
+              <Fingerprint className="w-5 h-5" />
+              Bake 3D Holes
+            </button>
+            <button
+              onClick={() => setIsEditingMetaballs(!isEditingMetaballs)}
+              className={`flex items-center gap-3 px-6 py-3 rounded-xl shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all font-medium border ${isEditingMetaballs
+                  ? 'bg-cyan-500 hover:bg-cyan-400 border-cyan-300/50 text-white'
+                  : 'bg-cyan-700 hover:bg-cyan-600 border-cyan-400/30 text-white'
+                }`}
+            >
+              <Circle className="w-5 h-5" />
+              {isEditingMetaballs ? 'Exit Metaballs' : 'Edit Metaballs'}
+            </button>
+            <button
+              onClick={() => setFabricEnabled(!fabricEnabled)}
+              className={`flex items-center gap-3 px-6 py-3 rounded-xl shadow-lg transition-all font-medium border ${fabricEnabled
+                  ? 'bg-pink-500 hover:bg-pink-400 border-pink-300/50 text-white'
+                  : 'bg-slate-700 hover:bg-slate-600 border-slate-500/50 text-white'
+                }`}
+            >
+              <Waves className="w-5 h-5" />
+              {fabricEnabled ? 'Hide Fabric Drape' : 'Show Fabric Drape'}
+            </button>
+            <div className="flex gap-3 mt-2">
+              <button
+                onClick={handleSaveProject}
+                className="flex-1 flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2.5 rounded-xl shadow-lg transition-all font-medium border border-slate-500/50 text-sm"
+                title="Save entire scene and pattern state"
+              >
+                <Save className="w-4 h-4" />
+                Save Project
+              </button>
+              <button
+                onClick={handleLoadProject}
+                className="flex-1 flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 text-white px-4 py-2.5 rounded-xl shadow-lg transition-all font-medium border border-slate-500/50 text-sm"
+                title="Load saved scene and pattern state"
+              >
+                <FolderOpen className="w-4 h-4" />
+                Load Project
+              </button>
+            </div>
+            <div className="bg-[#1C1D21]/95 backdrop-blur-md border border-white/10 p-3 rounded-xl shadow-lg mt-1">
+              <div className="flex justify-between text-[10px] mb-1">
                 <span className="text-amber-400 font-medium">Edge Cull Radius</span>
                 <span className="font-mono text-gray-400">{(globalSettings.edgeCullRadius ?? 0).toFixed(0)}px</span>
-            </div>
-            <input
+              </div>
+              <input
                 type="range"
                 min="0" max="80" step="1"
                 value={globalSettings.edgeCullRadius ?? 0}
                 onChange={e => setGlobalSettings((s: any) => ({ ...s, edgeCullRadius: parseFloat(e.target.value) }))}
                 className="w-full accent-amber-500"
-            />
-            <div className="text-[9px] text-gray-500 mt-0.5">
+              />
+              <div className="text-[9px] text-gray-500 mt-0.5">
                 Removes dots near geometry edges
+              </div>
             </div>
+            <button
+              onClick={handleExportFabric}
+              disabled={!fabricEnabled}
+              className={`flex items-center justify-center gap-2 mt-1 px-4 py-2.5 rounded-xl shadow-lg transition-all font-medium border text-sm w-full ${fabricEnabled
+                  ? 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-400/30'
+                  : 'bg-indigo-600/30 text-white/40 border-indigo-400/10 cursor-not-allowed'
+                }`}
+              title="Export the final generated fabric geometry to STL"
+            >
+              <Download className="w-4 h-4" />
+              Export Fabric (STL)
+            </button>
           </div>
-          <button
-            onClick={handleExportFabric}
-            disabled={!fabricEnabled}
-            className={`flex items-center justify-center gap-2 mt-1 px-4 py-2.5 rounded-xl shadow-lg transition-all font-medium border text-sm w-full ${
-              fabricEnabled 
-                ? 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-400/30' 
-                : 'bg-indigo-600/30 text-white/40 border-indigo-400/10 cursor-not-allowed'
-            }`}
-            title="Export the final generated fabric geometry to STL"
-          >
-            <Download className="w-4 h-4" />
-            Export Fabric (STL)
-          </button>
-        </div>
 
-        {isEditing3D && (
-          <div className="absolute bottom-12 left-6 z-20 bg-[#1C1D21]/95 backdrop-blur-md border border-white/10 p-4 rounded-2xl shadow-2xl w-64">
-            <div className="flex justify-between text-xs text-gray-300 mb-2 font-medium uppercase tracking-wider">
+          {isEditing3D && (
+            <div className="absolute bottom-12 left-6 z-20 bg-[#1C1D21]/95 backdrop-blur-md border border-white/10 p-4 rounded-2xl shadow-2xl w-64">
+              <div className="flex justify-between text-xs text-gray-300 mb-2 font-medium uppercase tracking-wider">
                 <span>Global Scale</span>
                 <span className="font-mono text-blue-400">{(globalSettings.globalScale || 1.0).toFixed(2)}x</span>
-            </div>
-            <input 
-                type="range" 
-                min="0.1" max={GLOBAL_SCALE_MAX} step="0.05" 
-                value={globalSettings.globalScale || 1.0} 
+              </div>
+              <input
+                type="range"
+                min="0.1" max={GLOBAL_SCALE_MAX} step="0.05"
+                value={globalSettings.globalScale || 1.0}
                 onChange={e => setGlobalSettings((s: any) => ({ ...s, globalScale: parseFloat(e.target.value) }))}
                 className="w-full accent-blue-500"
-            />
-            <div className="flex justify-between text-xs text-gray-300 mt-4 mb-2 font-medium uppercase tracking-wider">
+              />
+              <div className="flex justify-between text-xs text-gray-300 mt-4 mb-2 font-medium uppercase tracking-wider">
                 <span>Line Thickness</span>
                 <span className="font-mono text-blue-400">{(globalSettings.lineThicknessScale ?? 1.0).toFixed(2)}x</span>
-            </div>
-            <input
+              </div>
+              <input
                 type="range"
                 min={LINE_THICKNESS_SCALE_MIN} max={LINE_THICKNESS_SCALE_MAX} step="0.05"
                 value={globalSettings.lineThicknessScale ?? 1.0}
                 onChange={e => setGlobalSettings((s: any) => ({ ...s, lineThicknessScale: parseFloat(e.target.value) }))}
                 className="w-full accent-blue-500"
-            />
-          </div>
-        )}
+              />
+            </div>
+          )}
         </>
       )}
 

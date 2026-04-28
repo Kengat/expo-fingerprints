@@ -90,17 +90,27 @@ export function createFabricDrape(p, baseGeometry, secondaryGeometry, sceneOrigi
     mbDispose = mb.dispose;
   }
 
-  for (const item of items) {
-    const segments = 200; // High resolution for smooth drape
-    
-    let currentStrip = [];
-    const strips = [];
+    for (const item of items) {
+      // Adaptive segments for tiny dashes to avoid aliasing
+      let dynamicSegments = 200;
+      if (item.isDashed) {
+         const smallest = Math.min(item.dashLength || 5, item.gapLength || 5);
+         dynamicSegments = Math.max(200, Math.ceil((100 / smallest) * 1.5));
+         dynamicSegments = Math.min(2000, dynamicSegments); // clamp
+      }
+      const segments = dynamicSegments;
+      
+      let currentStrip = [];
+      const strips = [];
 
-    // Fallback to old behavior if old items are present
-    const isBezier = item.type === 'bezier' && item.start;
+      // Fallback to old behavior if old items are present
+      const isBezier = item.type === 'bezier' && item.start;
 
-    for (let j = 0; j <= segments; j++) {
-      let x, waveZ;
+      let accDist = 0;
+      let prevPt = null;
+
+      for (let j = 0; j <= segments; j++) {
+        let x, waveZ;
       
       if (item.type === 'polyline' && item.points && item.points.length > 1) {
         // Calculate total length
@@ -149,6 +159,27 @@ export function createFabricDrape(p, baseGeometry, secondaryGeometry, sceneOrigi
         waveZ = (item.z || 0) + noiseVal * (item.waviness || 2.0);
       }
       
+      if (prevPt) {
+          accDist += Math.hypot(x - prevPt.x, waveZ - prevPt.z);
+      }
+      prevPt = { x, z: waveZ };
+
+      let inDash = true;
+      if (item.isDashed) {
+          const dashL = item.dashLength || 5;
+          const gapL = item.gapLength || 5;
+          const modulo = accDist % (dashL + gapL);
+          inDash = modulo < dashL;
+      }
+
+      if (!inDash) {
+          if (currentStrip.length > 0) {
+              strips.push(currentStrip);
+              currentStrip = [];
+          }
+          continue;
+      }
+
       // Raycast straight down from the top height
       const origin = new THREE.Vector3(x, topHeight, waveZ);
       const dir = new THREE.Vector3(0, -1, 0);

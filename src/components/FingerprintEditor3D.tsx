@@ -294,14 +294,24 @@ export function FingerprintEditor3D({ pavilion3DRef, items, onItemsChange, globa
         const computedItems = getComputedItems(items, globalSettings);
 
         for (const item of computedItems) {
-            const uv = itemToUV(item);
-            const sample = sampleSurfaceAtUV(geomToUse, uv.u, uv.v);
-            if (!sample) continue;
+            let worldPos: THREE.Vector3;
+            let worldNormal: THREE.Vector3;
 
-            const worldPos = sample.position.clone();
-            shell.localToWorld(worldPos);
-            const worldNormal = sample.normal.clone();
-            worldNormal.transformDirection(shell.matrixWorld);
+            if (item.surfaceAnchor) {
+                worldPos = new THREE.Vector3().fromArray(item.surfaceAnchor.position);
+                shell.localToWorld(worldPos);
+                worldNormal = new THREE.Vector3().fromArray(item.surfaceAnchor.normal).normalize();
+                worldNormal.transformDirection(shell.matrixWorld);
+            } else {
+                const uv = itemToUV(item);
+                const sample = sampleSurfaceAtUV(geomToUse, uv.u, uv.v);
+                if (!sample) continue;
+
+                worldPos = sample.position.clone();
+                shell.localToWorld(worldPos);
+                worldNormal = sample.normal.clone();
+                worldNormal.transformDirection(shell.matrixWorld);
+            }
 
             let markerGroup = existingMap.get(item.id);
             if (!markerGroup) {
@@ -311,7 +321,7 @@ export function FingerprintEditor3D({ pavilion3DRef, items, onItemsChange, globa
 
             markerGroup.position.copy(worldPos);
             markerGroup.position.addScaledVector(worldNormal, 0.1);
-            markerGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), worldNormal);
+            markerGroup.quaternion.copy(engine.camera.quaternion);
             markerGroup.scale.setScalar(BASE_MARKER_RADIUS * item.scale);
             markerGroup.userData.itemId = item.id;
 
@@ -479,6 +489,9 @@ export function FingerprintEditor3D({ pavilion3DRef, items, onItemsChange, globa
                     const geomForUV = baseGeom || shell.geometry;
                     const localPoint = intersects[0].point.clone();
                     shell.worldToLocal(localPoint);
+                    const localNormal = intersects[0].face?.normal
+                        ? intersects[0].face.normal.clone().normalize()
+                        : new THREE.Vector3(0, 1, 0);
                     const newUV = findClosestUV(localPoint, geomForUV);
                     if (newUV) {
                         const newComputedPos = uvToItemPos(newUV.u, newUV.v);
@@ -487,7 +500,16 @@ export function FingerprintEditor3D({ pavilion3DRef, items, onItemsChange, globa
                         const origY = UV_SIZE / 2 + (newComputedPos.y - UV_SIZE / 2) / gs;
 
                         onItemsChangeRef.current(currentItems.map(it =>
-                            it.id === drag.itemId ? { ...it, x: origX, y: origY } : it
+                            it.id === drag.itemId ? {
+                                ...it,
+                                x: origX,
+                                y: origY,
+                                surfaceAnchor: {
+                                    position: localPoint.toArray() as [number, number, number],
+                                    normal: localNormal.toArray() as [number, number, number],
+                                    faceIndex: intersects[0].faceIndex ?? undefined,
+                                },
+                            } : it
                         ));
                     }
                 }

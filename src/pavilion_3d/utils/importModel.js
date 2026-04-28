@@ -13,6 +13,16 @@ let _cachedCheckerTexture = null;
 const _originalGeometryStates = new WeakMap();
 let _smartUvUnwrapperPromise = null;
 
+const NATIVE_UV_METHODS = new Set([
+    'native-minimum-stretch',
+    'native-angle-based',
+    'native-conformal',
+]);
+
+export function isNativeUVMethod(method) {
+    return NATIVE_UV_METHODS.has(method);
+}
+
 function toAbsoluteAssetUrl(url) {
     if (!url) return url;
     if (/^(?:[a-z]+:)?\/\//i.test(url) || url.startsWith('blob:') || url.startsWith('data:')) {
@@ -196,11 +206,12 @@ function getSmartUvOptions(geometry) {
     const faceCount = geometry.index ? geometry.index.count / 3 : geometry.getAttribute('position').count / 3;
     const resolution = 2048;
     const padding = Math.max(4, Math.round(resolution / 512));
+    const isLargeMesh = faceCount > 20000;
 
     return {
         chartOptions: {
             fixWinding: true,
-            maxIterations: faceCount > 120000 ? 2 : 4,
+            maxIterations: faceCount > 120000 ? 1 : isLargeMesh ? 2 : 4,
             maxCost: 3,
             normalDeviationWeight: 2.5,
             normalSeamWeight: 4.5,
@@ -214,7 +225,7 @@ function getSmartUvOptions(geometry) {
             padding,
             bilinear: true,
             blockAlign: true,
-            bruteForce: faceCount <= 40000,
+            bruteForce: faceCount <= 2000,
             createImage: false,
             maxChartSize: 0,
             rotateCharts: true,
@@ -437,7 +448,11 @@ export async function applyUVMethod(geometry, method) {
         unwrapper.chartOptions = chartOptions;
         unwrapper.packOptions = packOptions;
 
-        console.log('[SmartUV] Unwrapping geometry...');
+        console.log(
+            `[SmartUV] Unwrapping geometry: ${Math.round(workingGeometry.index.count / 3)} faces, ` +
+            `${workingGeometry.getAttribute('position').count} vertices, ` +
+            `bruteForce=${packOptions.bruteForce}, maxIterations=${chartOptions.maxIterations}`
+        );
         const savedImportTransform = geometry.userData.importTransform;
         await unwrapper.unwrapGeometry(workingGeometry);
         applyGeometryState(geometry, cloneGeometryState(workingGeometry));
@@ -907,8 +922,72 @@ function collectGeometries(object) {
 // Main import function
 // ---------------------------------------------------------------------------
 
-async function loadRawModelGeometry(file) {
+function objTextToGeometry(text) {
+    const loader = new OBJLoader();
+    const object = loader.parse(text);
+    const geometries = collectGeometries(object);
+
+    if (geometries.length === 0) {
+        throw new Error('No geometry found in OBJ file');
+    }
+
+    console.log(`[Import] OBJ loaded: ${geometries.length} component(s)`);
+
+    let merged;
+    if (geometries.length === 1) {
+        merged = geometries[0];
+    } else {
+        merged = mergeGeometries(geometries, false);
+        for (const g of geometries) g.dispose();
+    }
+
+    if (!merged) {
+        throw new Error('Failed to merge geometries');
+    }
+
+    if (merged.attributes.uv) {
+        merged.userData.originalUVs = merged.attributes.uv.clone();
+    }
+
+    console.log(`[Import] Merged geometry: ${merged.attributes.position.count} vertices`);
+    return merged;
+}
+
+async function loadNativeUvModelGeometry(file, uvMethod) {
+    const response = await fetch(
+        `http://127.0.0.1:3100/unwrap?method=${encodeURIComponent(uvMethod)}&filename=${encodeURIComponent(file.name)}`,
+        {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'X-File-Name': file.name,
+            },
+            body: await file.arrayBuffer(),
+        }
+    );
+
+    if (!response.ok) {
+        let message = await response.text();
+        try {
+            const parsed = JSON.parse(message);
+            message = parsed.error || message;
+        } catch {
+            // Keep raw error text.
+        }
+        throw new Error(`Native UV unwrap failed: ${message}`);
+    }
+
+    const text = await response.text();
+    console.log(`[NativeUV] Blender unwrap complete: ${file.name}`);
+    return objTextToGeometry(text);
+}
+
+async function loadRawModelGeometry(file, uvMethod = null) {
     const fileName = file.name.toLowerCase();
+
+    if (isNativeUVMethod(uvMethod)) {
+        return loadNativeUvModelGeometry(file, uvMethod);
+    }
 
     if (fileName.endsWith('.stl')) {
         const loader = new STLLoader();
@@ -919,35 +998,8 @@ async function loadRawModelGeometry(file) {
     }
 
     if (fileName.endsWith('.obj')) {
-        const loader = new OBJLoader();
         const text = await file.text();
-        const object = loader.parse(text);
-        const geometries = collectGeometries(object);
-
-        if (geometries.length === 0) {
-            throw new Error('No geometry found in OBJ file');
-        }
-
-        console.log(`[Import] OBJ loaded: ${geometries.length} component(s)`);
-
-        let merged;
-        if (geometries.length === 1) {
-            merged = geometries[0];
-        } else {
-            merged = mergeGeometries(geometries, false);
-            for (const g of geometries) g.dispose();
-        }
-
-        if (!merged) {
-            throw new Error('Failed to merge geometries');
-        }
-
-        if (merged.attributes.uv) {
-            merged.userData.originalUVs = merged.attributes.uv.clone();
-        }
-
-        console.log(`[Import] Merged geometry: ${merged.attributes.position.count} vertices`);
-        return merged;
+        return objTextToGeometry(text);
     }
 
     throw new Error('Unsupported file format. Use .obj or .stl');
@@ -971,7 +1023,7 @@ export function importModelFile(uvMethod, callback, options = {}) {
         if (!file) return;
 
         try {
-            const rawGeometry = await loadRawModelGeometry(file);
+            const rawGeometry = await loadRawModelGeometry(file, uvMethod);
             const shouldNormalize = options.normalize !== false;
             let geometry = rawGeometry;
 
@@ -980,11 +1032,14 @@ export function importModelFile(uvMethod, callback, options = {}) {
                 geometry = normalizedGeometry;
             }
 
-            await applyUVMethod(geometry, uvMethod);
+            if (!isNativeUVMethod(uvMethod)) {
+                await applyUVMethod(geometry, uvMethod);
+            }
             geometry.computeVertexNormals();
             callback(geometry, file);
         } catch (err) {
             console.error('[Import] Parse error:', err);
+            alert(err instanceof Error ? err.message : String(err));
         }
     });
 

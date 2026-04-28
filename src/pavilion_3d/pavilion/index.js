@@ -37,6 +37,346 @@ const MAX_WORLD_RADIUS = 2.0;
 const MIN_CIRCLE_DISTANCE_SQ = 0.001;
 const MIN_TUBE_SEGMENTS = 4;
 const MAX_TUBE_SEGMENTS = 40;
+const WRAPPED_DECAL_TOPOLOGY_KEY = '_fingerprintWrappedDecalTopology';
+
+function getWrappedDecalTopology(geometry) {
+  if (geometry.userData?.[WRAPPED_DECAL_TOPOLOGY_KEY]) {
+    return geometry.userData[WRAPPED_DECAL_TOPOLOGY_KEY];
+  }
+
+  const positionAttr = geometry.getAttribute('position');
+  if (!positionAttr) return null;
+
+  const index = geometry.getIndex();
+  const triCount = index ? Math.floor(index.count / 3) : Math.floor(positionAttr.count / 3);
+  const positions = new Map();
+  const keyByIndex = new Map();
+  const triVertexIndices = new Array(triCount);
+  const triVertexKeys = new Array(triCount);
+  const adjacency = Array.from({ length: triCount }, () => []);
+  const edgeMap = new Map();
+  const tmp = new THREE.Vector3();
+
+  const getVertexIndex = (triIndex, corner) => index ? index.getX(triIndex * 3 + corner) : triIndex * 3 + corner;
+  const getPosition = (vertexIndex) => {
+    let p = positions.get(vertexIndex);
+    if (!p) {
+      p = new THREE.Vector3().fromBufferAttribute(positionAttr, vertexIndex);
+      positions.set(vertexIndex, p);
+    }
+    return p;
+  };
+  const getPositionKey = (vertexIndex) => {
+    let key = keyByIndex.get(vertexIndex);
+    if (!key) {
+      tmp.fromBufferAttribute(positionAttr, vertexIndex);
+      key = `${Math.round(tmp.x * 10000)}|${Math.round(tmp.y * 10000)}|${Math.round(tmp.z * 10000)}`;
+      keyByIndex.set(vertexIndex, key);
+    }
+    return key;
+  };
+
+  for (let tri = 0; tri < triCount; tri++) {
+    const indices = [getVertexIndex(tri, 0), getVertexIndex(tri, 1), getVertexIndex(tri, 2)];
+    const keys = indices.map(getPositionKey);
+    triVertexIndices[tri] = indices;
+    triVertexKeys[tri] = keys;
+
+    for (const [a, b] of [[0, 1], [1, 2], [2, 0]]) {
+      const edgeKey = keys[a] < keys[b] ? `${keys[a]}__${keys[b]}` : `${keys[b]}__${keys[a]}`;
+      const existing = edgeMap.get(edgeKey);
+      if (existing) {
+        for (const other of existing) {
+          adjacency[tri].push({ tri: other.tri, shared: [keys[a], keys[b]] });
+          adjacency[other.tri].push({ tri, shared: [keys[a], keys[b]] });
+        }
+        existing.push({ tri });
+      } else {
+        edgeMap.set(edgeKey, [{ tri }]);
+      }
+    }
+  }
+
+  const topology = { positionAttr, triCount, positions, triVertexIndices, triVertexKeys, adjacency };
+  geometry.userData[WRAPPED_DECAL_TOPOLOGY_KEY] = topology;
+  return topology;
+}
+
+function findClosestWrappedDecalTriangle(topology, anchor) {
+  const triHelper = new THREE.Triangle();
+  const closest = new THREE.Vector3();
+  let bestTri = -1;
+  let bestDistSq = Infinity;
+
+  for (let tri = 0; tri < topology.triCount; tri++) {
+    const indices = topology.triVertexIndices[tri];
+    if (!indices || indices.length !== 3) continue;
+    const a = topology.positions.get(indices[0]);
+    const b = topology.positions.get(indices[1]);
+    const c = topology.positions.get(indices[2]);
+    if (!a || !b || !c) continue;
+    triHelper.set(
+      a,
+      b,
+      c
+    );
+    triHelper.closestPointToPoint(anchor, closest);
+    const distSq = closest.distanceToSquared(anchor);
+    if (distSq < bestDistSq) {
+      bestDistSq = distSq;
+      bestTri = tri;
+    }
+  }
+
+  return bestTri;
+}
+
+function isValidWrappedChart(chart) {
+  return Array.isArray(chart) &&
+    chart.length === 3 &&
+    chart.every((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+}
+
+function placeWrappedDecalNeighbor(topology, currentTri, currentChart, nextTri, sharedKeys) {
+  if (!isValidWrappedChart(currentChart)) return null;
+  const currentKeys = topology.triVertexKeys[currentTri];
+  const nextKeys = topology.triVertexKeys[nextTri];
+  if (!currentKeys || !nextKeys) return null;
+  const shared = sharedKeys.filter((key) => currentKeys.includes(key) && nextKeys.includes(key));
+  if (shared.length !== 2) return null;
+
+  const currentShared = shared.map((key) => currentKeys.indexOf(key));
+  const nextShared = shared.map((key) => nextKeys.indexOf(key));
+  const currentThird = currentKeys.findIndex((key) => !shared.includes(key));
+  const nextThird = nextKeys.findIndex((key) => !shared.includes(key));
+  if (currentThird < 0 || nextThird < 0) return null;
+
+  const a2 = currentChart[currentShared[0]];
+  const b2 = currentChart[currentShared[1]];
+  const currentThird2 = currentChart[currentThird];
+  if (!a2 || !b2 || !currentThird2) return null;
+  const edge = b2.clone().sub(a2);
+  const edgeLen = edge.length();
+  if (edgeLen < 1e-6) return null;
+
+  const nextIndices = topology.triVertexIndices[nextTri];
+  if (!nextIndices || nextIndices.length !== 3) return null;
+  const a3 = topology.positions.get(nextIndices[nextShared[0]]);
+  const b3 = topology.positions.get(nextIndices[nextShared[1]]);
+  const c3 = topology.positions.get(nextIndices[nextThird]);
+  if (!a3 || !b3 || !c3) return null;
+  const distA = c3.distanceTo(a3);
+  const distB = c3.distanceTo(b3);
+  const x = (distA * distA - distB * distB + edgeLen * edgeLen) / (2 * edgeLen);
+  const hSq = Math.max(0, distA * distA - x * x);
+  const h = Math.sqrt(hSq);
+  const dir = edge.multiplyScalar(1 / edgeLen);
+  const base = a2.clone().addScaledVector(dir, x);
+  const perp = new THREE.Vector2(-dir.y, dir.x);
+  const candidateA = base.clone().addScaledVector(perp, h);
+  const candidateB = base.clone().addScaledVector(perp, -h);
+  const currentSide = Math.sign(edge.cross(currentThird2.clone().sub(a2)));
+  const sideA = Math.sign(edge.cross(candidateA.clone().sub(a2)));
+  const third2 = currentSide === 0 || sideA === -currentSide ? candidateA : candidateB;
+
+  const nextChart = new Array(3);
+  nextChart[nextShared[0]] = a2.clone();
+  nextChart[nextShared[1]] = b2.clone();
+  nextChart[nextThird] = third2;
+  return nextChart;
+}
+
+function rotateWrappedDecalPoint(point, radians) {
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return new THREE.Vector2(
+    point.x * cos - point.y * sin,
+    point.x * sin + point.y * cos
+  );
+}
+
+function wrappedDecalTriangleIntersects(chart, size, rotation) {
+  if (!isValidWrappedChart(chart) || !size || size.x <= 0 || size.y <= 0) return false;
+  const margin = 0.08;
+  let minU = Infinity;
+  let maxU = -Infinity;
+  let minV = Infinity;
+  let maxV = -Infinity;
+
+  for (const p of chart) {
+    const rp = rotateWrappedDecalPoint(p, -rotation);
+    const u = rp.x / size.x + 0.5;
+    const v = rp.y / size.y + 0.5;
+    minU = Math.min(minU, u);
+    maxU = Math.max(maxU, u);
+    minV = Math.min(minV, v);
+    maxV = Math.max(maxV, v);
+  }
+
+  return maxU >= -margin && minU <= 1 + margin && maxV >= -margin && minV <= 1 + margin;
+}
+
+function createWrappedSurfaceDecalGeometry(shellMesh, decal) {
+  const topology = getWrappedDecalTopology(shellMesh.geometry);
+  if (!topology) return null;
+
+  const anchor = new THREE.Vector3().fromArray(decal.position);
+  const size = new THREE.Vector3().fromArray(decal.size);
+  const rotation = (decal.rotation || 0) * Math.PI / 180;
+  const seedTri = Number.isInteger(decal.faceIndex) && decal.faceIndex >= 0 && decal.faceIndex < topology.triCount
+    ? decal.faceIndex
+    : findClosestWrappedDecalTriangle(topology, anchor);
+  if (seedTri < 0) return null;
+
+  const seedIndices = topology.triVertexIndices[seedTri];
+  if (!seedIndices || seedIndices.length !== 3) return null;
+  const seedA = topology.positions.get(seedIndices[0]);
+  const seedB = topology.positions.get(seedIndices[1]);
+  const seedC = topology.positions.get(seedIndices[2]);
+  if (!seedA || !seedB || !seedC) return null;
+  const seedNormal = new THREE.Triangle(seedA, seedB, seedC).getNormal(new THREE.Vector3());
+  if (seedNormal.lengthSq() < 1e-10) return null;
+
+  let tangentX = seedB.clone().sub(seedA).projectOnPlane(seedNormal).normalize();
+  if (tangentX.lengthSq() < 1e-10) {
+    tangentX = new THREE.Vector3(1, 0, 0).projectOnPlane(seedNormal).normalize();
+  }
+  const tangentY = new THREE.Vector3().crossVectors(seedNormal, tangentX).normalize();
+  const projectSeed = (p) => {
+    const rel = p.clone().sub(anchor);
+    return new THREE.Vector2(rel.dot(tangentX), rel.dot(tangentY));
+  };
+
+  const charts = new Map();
+  charts.set(seedTri, [projectSeed(seedA), projectSeed(seedB), projectSeed(seedC)]);
+
+  const queue = [seedTri];
+  const maxTriangles = 9000;
+  while (queue.length > 0 && charts.size < maxTriangles) {
+    const currentTri = queue.shift();
+    const currentChart = charts.get(currentTri);
+    if (!isValidWrappedChart(currentChart)) continue;
+    for (const next of topology.adjacency[currentTri]) {
+      if (charts.has(next.tri)) continue;
+      const nextChart = placeWrappedDecalNeighbor(topology, currentTri, currentChart, next.tri, next.shared);
+      if (!nextChart) continue;
+      if (next.tri !== seedTri && !wrappedDecalTriangleIntersects(nextChart, size, rotation)) continue;
+      charts.set(next.tri, nextChart);
+      queue.push(next.tri);
+    }
+  }
+
+  const positions = [];
+  const uvs = [];
+  const normals = [];
+  const faceNormal = new THREE.Vector3();
+
+  for (const [tri, chart] of charts) {
+    if (tri !== seedTri && !wrappedDecalTriangleIntersects(chart, size, rotation)) continue;
+    const indices = topology.triVertexIndices[tri];
+    if (!indices || indices.length !== 3) continue;
+    const a = topology.positions.get(indices[0]);
+    const b = topology.positions.get(indices[1]);
+    const c = topology.positions.get(indices[2]);
+    if (!a || !b || !c) continue;
+    faceNormal.subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a)).normalize();
+    if (faceNormal.lengthSq() < 1e-10) continue;
+
+    for (let i = 0; i < 3; i++) {
+      const p = topology.positions.get(indices[i]);
+      if (!p || !chart[i]) continue;
+      positions.push(
+        p.x + faceNormal.x * 0.035,
+        p.y + faceNormal.y * 0.035,
+        p.z + faceNormal.z * 0.035
+      );
+
+      const rp = rotateWrappedDecalPoint(chart[i], -rotation);
+      uvs.push(rp.x / size.x + 0.5, 1 - (rp.y / size.y + 0.5));
+      normals.push(faceNormal.x, faceNormal.y, faceNormal.z);
+    }
+  }
+
+  if (positions.length === 0) return null;
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function createFingerprintSurfaceDecals(shellMesh, decals) {
+  const group = new THREE.Group();
+  group.name = 'fingerprint-surface-decals';
+  if (!Array.isArray(decals) || decals.length === 0) return group;
+
+  for (const decal of decals) {
+    if (!decal?.texture || !decal?.position || !decal?.normal || !decal?.size) continue;
+
+    const geometry = createWrappedSurfaceDecalGeometry(shellMesh, decal);
+    if (!geometry) continue;
+
+    const material = new THREE.MeshBasicMaterial({
+      map: decal.texture,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+      alphaTest: 0.05,
+      polygonOffset: true,
+      polygonOffsetFactor: -4,
+      side: THREE.DoubleSide,
+      toneMapped: true,
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = 'fingerprint-surface-decal';
+    mesh.renderOrder = 10;
+    group.add(mesh);
+  }
+
+  return group;
+}
+
+function createFingerprintNativeSurfaceDecals(nativeDecals) {
+  const group = new THREE.Group();
+  group.name = 'fingerprint-native-surface-decals';
+  if (!Array.isArray(nativeDecals) || nativeDecals.length === 0) return group;
+
+  for (const decal of nativeDecals) {
+    if (!decal?.texture || !Array.isArray(decal.positions) || !Array.isArray(decal.uvs) || decal.positions.length < 9) continue;
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(decal.positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(decal.uvs, 2));
+    if (Array.isArray(decal.normals) && decal.normals.length === decal.positions.length) {
+      geometry.setAttribute('normal', new THREE.Float32BufferAttribute(decal.normals, 3));
+    } else {
+      geometry.computeVertexNormals();
+    }
+    geometry.computeBoundingSphere();
+
+    const material = new THREE.MeshBasicMaterial({
+      map: decal.texture,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+      alphaTest: 0.05,
+      polygonOffset: true,
+      polygonOffsetFactor: -8,
+      side: THREE.DoubleSide,
+      toneMapped: true,
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = 'fingerprint-native-surface-decal';
+    mesh.renderOrder = 20;
+    group.add(mesh);
+  }
+
+  return group;
+}
 
 function deduplicateCircles(circles) {
   const result = [];
@@ -289,6 +629,32 @@ function buildDrillGeometriesFromMesh(circles, canvasW, canvasH, geometry, thick
     for (const u of uniqueCandidates) {
       drillGeometries.push(u.drillGeom);
     }
+  }
+
+  return drillGeometries;
+}
+
+function buildDrillGeometriesFromSurface(circles, thickness = 0) {
+  const drillGeometries = [];
+  const dummyObj = new THREE.Object3D();
+
+  for (const circle of circles || []) {
+    if (!Array.isArray(circle.position) || !Array.isArray(circle.normal)) continue;
+    const pt = new THREE.Vector3().fromArray(circle.position);
+    const normal = new THREE.Vector3().fromArray(circle.normal).normalize();
+    if (normal.lengthSq() < 0.5) continue;
+
+    const worldRadius = Math.max(MIN_WORLD_RADIUS, Math.min(MAX_WORLD_RADIUS, Number(circle.r) || MIN_WORLD_RADIUS));
+    const drillHeight = thickness > 0 ? thickness * 2 : 5.0;
+    const drillGeom = new THREE.CylinderGeometry(
+      worldRadius, worldRadius, drillHeight, DRILL_SEGMENTS
+    );
+
+    dummyObj.position.copy(pt);
+    dummyObj.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
+    dummyObj.updateMatrix();
+    drillGeom.applyMatrix4(dummyObj.matrix);
+    drillGeometries.push(drillGeom);
   }
 
   return drillGeometries;
@@ -1213,6 +1579,62 @@ function buildTubeGeometriesFromMesh(lines, canvasW, canvasH, geometry, extrusio
   return { tubeGeometries, sphereGeometries };
 }
 
+function buildTubeGeometriesFromSurface(lines) {
+  const tubeGeometries = [];
+  const sphereGeometries = [];
+
+  for (let lineIndex = 0; lineIndex < (lines || []).length; lineIndex++) {
+    const line = lines[lineIndex];
+    if (!Array.isArray(line) || line.length < 2) continue;
+
+    const centers = [];
+    const filteredLine2D = [];
+    let totalRadius = 0;
+    for (const point of line) {
+      if (!Array.isArray(point.position)) continue;
+      centers.push(new THREE.Vector3().fromArray(point.position));
+      if (Number.isFinite(point.x) && Number.isFinite(point.y)) {
+        filteredLine2D.push({ x: point.x, y: point.y });
+      }
+      totalRadius += Math.max(MIN_WORLD_RADIUS, Math.min(MAX_WORLD_RADIUS, (Number(point.thickness) || MIN_WORLD_RADIUS) * 0.5));
+    }
+
+    if (centers.length < 2) continue;
+    const avgRadius = Math.max(MIN_WORLD_RADIUS, Math.min(MAX_WORLD_RADIUS, totalRadius / centers.length));
+    const curve = new THREE.CatmullRomCurve3(centers, false, 'chordal');
+    const segments = filteredLine2D.length >= 2
+      ? getAdaptiveTubeSegmentCount(filteredLine2D, 512, 512)
+      : Math.max(MIN_TUBE_SEGMENTS, Math.min(MAX_TUBE_SEGMENTS, Math.ceil(centers.length * 0.75)));
+    const sampledCenters = Array.from({ length: segments + 1 }, (_, i) => curve.getPointAt(i / segments));
+    const probeGeom = createClosedTubeGeometryTransport(sampledCenters, sampledCenters.length - 1, avgRadius, 6);
+    const probeSeams = analyzeTubeSeams(probeGeom);
+    probeGeom.dispose();
+    const cleanup = {
+      start: Boolean(probeSeams) && (
+        probeSeams.startBody.minQuality < 0.08 ||
+        probeSeams.startBody.maxAspect > 25 ||
+        probeSeams.startBody.degenerateCount > 0
+      ),
+      end: Boolean(probeSeams) && (
+        probeSeams.endBody.minQuality < 0.08 ||
+        probeSeams.endBody.maxAspect > 25 ||
+        probeSeams.endBody.degenerateCount > 0
+      ),
+    };
+    const stableCenters = stabilizeTubeCenters(sampledCenters, avgRadius, cleanup);
+    if (stableCenters.length < 2) continue;
+    const finalCenters = resamplePolylineEquidistant(stableCenters, segments);
+    if (finalCenters.length < 2) continue;
+
+    const closedGeom = createClosedTubeGeometryTransport(finalCenters, finalCenters.length - 1, avgRadius, 6);
+    closedGeom.userData.lineIndex = lineIndex;
+    closedGeom.userData.centerlineDebug = analyzeCenterline(finalCenters, avgRadius);
+    tubeGeometries.push(closedGeom);
+  }
+
+  return { tubeGeometries, sphereGeometries };
+}
+
 function extractOuterShell(finalGeom) {
   const keptIndices = [];
   const indexArray = finalGeom.index.array;
@@ -1269,15 +1691,29 @@ function postProcessGeometry(geom) {
 function buildSinglePavilion(p) {
   const pavilionGroup = new THREE.Group();
 
+  const hasNativeCircles = p.skinType === 'fingerprint' &&
+    p.fingerprintRenderMode === 'surface' &&
+    Array.isArray(p._fingerprintNativeCircles) &&
+    p._fingerprintNativeCircles.length > 0;
+
+  const hasNativeLines = p.skinType === 'fingerprint' &&
+    p.fingerprintRenderMode === 'surface' &&
+    Array.isArray(p._fingerprintNativeLines) &&
+    p._fingerprintNativeLines.length > 0;
+
   const hasVectorCircles = p.bakeHoles &&
     p.skinType === 'fingerprint' &&
-    Array.isArray(p._fingerprintCircles) &&
-    p._fingerprintCircles.length > 0;
+    ((hasNativeCircles) || (
+      Array.isArray(p._fingerprintCircles) &&
+      p._fingerprintCircles.length > 0
+    ));
 
   const hasVectorLines = (p.bakeTubes || p.previewTubes) &&
     p.skinType === 'fingerprint' &&
-    Array.isArray(p._fingerprintLines) &&
-    p._fingerprintLines.length > 0;
+    ((hasNativeLines) || (
+      Array.isArray(p._fingerprintLines) &&
+      p._fingerprintLines.length > 0
+    ));
 
   // Check if we have cached geometries from previous bakes to combine
   const hasCachedTubes = Array.isArray(p._cachedTubeGeometries) && p._cachedTubeGeometries.length > 0;
@@ -1456,11 +1892,13 @@ function buildSinglePavilion(p) {
 
     let drillGeometries = [];
     if (hasVectorCircles) {
-      const circles = deduplicateCircles(p._fingerprintCircles);
-      console.log(`[Bake] ${circles.length} circles (${p._fingerprintCircles.length} raw)`);
+      const circles = hasNativeCircles ? p._fingerprintNativeCircles : deduplicateCircles(p._fingerprintCircles);
+      console.log(`[Bake] ${circles.length} ${hasNativeCircles ? 'native surface' : 'UV'} circles (${hasNativeCircles ? p._fingerprintNativeCircles.length : p._fingerprintCircles.length} raw)`);
 
       const t1 = performance.now();
-      if (p.importMode && p._importedGeometry) {
+      if (hasNativeCircles) {
+        drillGeometries = buildDrillGeometriesFromSurface(circles, thickness);
+      } else if (p.importMode && p._importedGeometry) {
         drillGeometries = buildDrillGeometriesFromMesh(circles, canvasW, canvasH, p._importedGeometry, thickness);
       } else {
         const shellFunc = getShellFunction(p);
@@ -1473,11 +1911,15 @@ function buildSinglePavilion(p) {
     let tubeGeometries = [];
     let sphereGeometries = [];
     if (hasVectorLines) {
-      const lines = p._fingerprintLines;
-      console.log(`[Bake] ${lines.length} streamlines`);
+      const lines = hasNativeLines ? p._fingerprintNativeLines : p._fingerprintLines;
+      console.log(`[Bake] ${lines.length} ${hasNativeLines ? 'native surface' : 'UV'} streamlines`);
 
       const t1 = performance.now();
-      if (p.importMode && p._importedGeometry) {
+      if (hasNativeLines) {
+        const res = buildTubeGeometriesFromSurface(lines);
+        tubeGeometries = res.tubeGeometries;
+        sphereGeometries = res.sphereGeometries;
+      } else if (p.importMode && p._importedGeometry) {
         const res = buildTubeGeometriesFromMesh(lines, canvasW, canvasH, p._importedGeometry, p.fpLineExtrusion);
         tubeGeometries = res.tubeGeometries;
         sphereGeometries = res.sphereGeometries;
@@ -1693,20 +2135,20 @@ function buildSinglePavilion(p) {
         let resultManifold = geometryToManifold(shellGeom, false);
         console.log('[Bake] Base Manifold Status:', resultManifold.status(), 'Volume:', resultManifold.volume());
 
-        if (drillGeometries.length > 0) {
-          const mergedDrills = mergeGeomsUtil(drillGeometries, false);
-          const drillManifold = geometryToManifold(mergedDrills, true);
-          console.log('[Bake] Drill Manifold Status:', drillManifold.status(), 'Volume:', drillManifold.volume());
-          resultManifold = m.Manifold.difference(resultManifold, drillManifold);
-          mergedDrills.dispose();
-        }
-
         if (tubeGeometries.length > 0) {
           const mergedTubes = mergeGeomsUtil(tubeGeometries, false);
           const tubeManifold = geometryToManifold(mergedTubes, false, true);
           console.log('[Bake] Tube Manifold Status:', tubeManifold.status(), 'Volume:', tubeManifold.volume());
           resultManifold = m.Manifold.difference(resultManifold, tubeManifold);
           mergedTubes.dispose();
+        }
+
+        if (drillGeometries.length > 0) {
+          const mergedDrills = mergeGeomsUtil(drillGeometries, false);
+          const drillManifold = geometryToManifold(mergedDrills, true);
+          console.log('[Bake] Drill Manifold Status:', drillManifold.status(), 'Volume:', drillManifold.volume());
+          resultManifold = m.Manifold.difference(resultManifold, drillManifold);
+          mergedDrills.dispose();
         }
 
         console.log('[Bake] Final Result Manifold Status:', resultManifold.status(), 'Volume:', resultManifold.volume());
@@ -1787,6 +2229,15 @@ function buildSinglePavilion(p) {
   shellMesh.castShadow = true;
   shellMesh.receiveShadow = true;
   pavilionGroup.add(shellMesh);
+
+  if (p.skinType === 'fingerprint' && p.fingerprintRenderMode === 'surface') {
+    const hasNativeDecals = Array.isArray(p._fingerprintNativeDecals) && p._fingerprintNativeDecals.length > 0;
+    if (hasNativeDecals) {
+      pavilionGroup.add(createFingerprintNativeSurfaceDecals(p._fingerprintNativeDecals));
+    } else if (!p._fingerprintNativePending) {
+      pavilionGroup.add(createFingerprintSurfaceDecals(shellMesh, p._fingerprintDecals));
+    }
+  }
 
   if (secondaryGeom) {
     const secondaryMaterial = new THREE.MeshStandardMaterial({

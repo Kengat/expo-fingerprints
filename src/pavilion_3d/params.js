@@ -59,6 +59,7 @@ export const params = {
   previewExtrusion: false,
   previewExtrusionThickness: 5.0,
   fpBackgroundOpacity: 0.3,
+  fingerprintRenderMode: 'surface',
   fpSeed: 42,
   fpShowPreview: true,
   // Fingerprint 0
@@ -139,12 +140,13 @@ export const params = {
 
   // Import
   importMode: false,
-  importUVMethod: 'smart',
+  importUVMethod: 'native-minimum-stretch',
   importScale: 1.0,
   importShowUVCheck: false,
   _importedGeometry: null,
   _secondaryImportedGeometry: null,
   _glassGeometry: null,
+  _fingerprintDecals: [],
 };
 
 export const presets = {
